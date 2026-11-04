@@ -1051,6 +1051,9 @@ struct FrameController<G: GraphicsBackend> {
     app_fade_grid: bool,
     eyes_submitted: [Option<SubmittedEye>; 2],
     submitting_null: bool,
+    /// Frame-locked params so both eyes always use identical weights and
+    /// enhancement state; recomputed on the first eye of each frame.
+    frame_upscaler_params: Option<crate::upscaler::UpscalerParams>,
 }
 supported_backends_enum!(enum DynFrameController: FrameController);
 
@@ -1093,7 +1096,12 @@ impl<G: GraphicsBackend> FrameController<G> {
             .enumerate_images()
             .expect("Failed to enumerate swapchain images");
 
-        backend.store_swapchain_images(images, create_info.format);
+        backend.store_swapchain_images(
+            images,
+            create_info.format,
+            create_info.width,
+            create_info.height,
+        );
         debug!(
             "Created new swapchain: {}x{}, format = {:?}",
             create_info.width, create_info.height, create_info.format
@@ -1140,6 +1148,7 @@ impl<G: GraphicsBackend> FrameController<G> {
             app_fade_grid: false,
             eyes_submitted: Default::default(),
             submitting_null: false,
+            frame_upscaler_params: None,
         }
     }
 
@@ -1162,6 +1171,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         });
         self.acquire_swapchain_image();
         self.eyes_submitted = Default::default();
+        self.frame_upscaler_params = None;
     }
 
     fn acquire_swapchain_image(&mut self) {
@@ -1219,6 +1229,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         }
         self.eyes_submitted = [None; 2];
         self.submitting_null = false;
+        self.frame_upscaler_params = None;
         trace!("frame begin");
     }
 
@@ -1255,12 +1266,35 @@ impl<G: GraphicsBackend> FrameController<G> {
                         "App submitted a null texture and a normal texture in the same frame"
                     );
 
+                    let input_width = new_info.width;
+                    let input_height = new_info.height;
+                    let input_sample_count = new_info.sample_count;
                     if !self.swapchain_data.as_ref().is_some_and(|data| {
                         is_usable_swapchain(&data.info, data.initial_format, &new_info)
                     }) {
                         info!("recreating swapchain (for {eye:?})");
                         self.recreate_swapchain(session_data, new_info);
                     }
+
+                    let upscaler_params = if let Some(params) = self.frame_upscaler_params {
+                        Some(params)
+                    } else {
+                        let upscaler_config = crate::upscaler::snapshot();
+                        let computed = if upscaler_config.enabled
+                            && self.backend.supports_upscaler()
+                            && input_sample_count == 1
+                        {
+                            // Task 3 PoC: parameters are input-sized; the
+                            // output size split arrives with the fast path.
+                            let mut input_sized = upscaler_config.clone();
+                            input_sized.output_scale = 1.0;
+                            input_sized.params_for_size(input_width, input_height, bounds)
+                        } else {
+                            None
+                        };
+                        self.frame_upscaler_params = computed;
+                        computed
+                    };
 
                     SubmittedEye {
                         extent: self.backend.copy_texture_to_swapchain(
@@ -1270,6 +1304,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                             bounds,
                             self.image_index,
                             submit_flags,
+                            upscaler_params.as_ref(),
                         ),
                         flip_vertically: bounds.vertically_flipped(),
                     }
@@ -1470,6 +1505,8 @@ mod tests {
         vk: Arc<VulkanData>,
         swapchain_format: Option<u32>,
         flushes: AtomicUsize,
+        supports_upscaler: bool,
+        last_upscaler_params: Option<crate::upscaler::UpscalerParams>,
     }
     thread_local! {
         static SWAPCHAIN_WIDTH: Cell<u32> = const { Cell::new(10) };
@@ -1553,19 +1590,28 @@ mod tests {
             &mut self,
             _images: Vec<<Self::Api as openxr::Graphics>::SwapchainImage>,
             format: u32,
+            _width: u32,
+            _height: u32,
         ) {
             self.swapchain_format.replace(format);
         }
 
+        fn supports_upscaler(&self) -> bool {
+            self.supports_upscaler
+        }
+
+        #[allow(clippy::too_many_arguments)]
         fn copy_texture_to_swapchain(
-            &self,
+            &mut self,
             _eye: openvr::EVREye,
             _texture: Self::OpenVrTexture,
             _color_space: vr::EColorSpace,
             _bounds: openvr::VRTextureBounds_t,
             _image_index: usize,
             _submit_flags: openvr::EVRSubmitFlags,
+            params: Option<&crate::upscaler::UpscalerParams>,
         ) -> openxr::Extent2Di {
+            self.last_upscaler_params = params.copied();
             xr::Extent2Di::default()
         }
 
@@ -1603,6 +1649,8 @@ mod tests {
                 vk,
                 swapchain_format: Option::None,
                 flushes: AtomicUsize::new(0),
+                supports_upscaler: false,
+                last_upscaler_params: Option::None,
             }
         }
     }
@@ -1674,6 +1722,24 @@ mod tests {
             ctrl.backend.flushes.load(Ordering::Relaxed)
         }
 
+        fn set_fake_supports_upscaler(&self, supports: bool) {
+            let data = self.comp.openxr.session_data.get();
+            let mut lock = data.comp_data.0.lock().unwrap();
+            let DynFrameController::Fake(ctrl) = lock.as_mut().unwrap() else {
+                panic!("Frame controller was not set up or not faked!");
+            };
+            ctrl.backend.supports_upscaler = supports;
+        }
+
+        fn last_upscaler_params(&self) -> Option<crate::upscaler::UpscalerParams> {
+            let data = self.comp.openxr.session_data.get();
+            let lock = data.comp_data.0.lock().unwrap();
+            let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
+                panic!("Frame controller was not set up or not faked!");
+            };
+            ctrl.backend.last_upscaler_params
+        }
+
         fn set_should_render(&self, render: bool) {
             // fakexr never asks us to render; force the render path instead.
             let data = self.comp.openxr.session_data.get();
@@ -1683,6 +1749,37 @@ mod tests {
             };
             ctrl.should_render = render;
         }
+    }
+
+    #[test]
+    fn fake_backend_upscaler_is_opt_in() {
+        let _guard = crate::upscaler::test_lock();
+        crate::upscaler::reset_for_test();
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+
+        assert_eq!(f.wait_get_poses(), None);
+        f.set_should_render(true);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert!(f.last_upscaler_params().is_none());
+
+        f.set_fake_supports_upscaler(true);
+        crate::upscaler::set_for_test(crate::upscaler::UpscalerConfig {
+            enabled: true,
+            ..Default::default()
+        });
+        assert_eq!(f.wait_get_poses(), None);
+        f.set_should_render(true);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        let params = f.last_upscaler_params().expect("params should be recorded");
+        assert!(params.enabled);
+        assert_eq!(params.dst_width, SWAPCHAIN_WIDTH.with(Cell::get));
+        assert_eq!(params.dst_height, SWAPCHAIN_HEIGHT.with(Cell::get));
+        assert_eq!(params.shader_kind(), 1);
+
+        crate::upscaler::reset_for_test();
     }
 
     #[test]

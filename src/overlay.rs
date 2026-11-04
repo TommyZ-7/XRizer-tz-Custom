@@ -567,7 +567,7 @@ impl Overlay {
                 let images = swapchain
                     .enumerate_images()
                     .expect("Couldn't enumerate swapchain images");
-                backend.store_swapchain_images(images, info.format);
+                backend.store_swapchain_images(images, info.format, info.width, info.height);
                 SwapchainData {
                     swapchain,
                     info,

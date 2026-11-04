@@ -1,4 +1,7 @@
+mod upscaler;
+
 use super::GraphicsBackend;
+use crate::upscaler::UpscalerParams;
 use ash::vk::{self, Handle};
 use log::warn;
 use openvr as vr;
@@ -6,6 +9,7 @@ use openxr as xr;
 use std::collections::HashSet;
 use std::ffi::{CString, c_char};
 use std::sync::{LazyLock, Mutex};
+use upscaler::UpscalerPipeline;
 
 struct RealSessionData {
     images: Vec<vk::Image>,
@@ -17,6 +21,9 @@ struct RealSessionData {
     /// stay valid while it is set (OpenVR releases it via ClearOverlayTexture),
     /// so the image view and framebuffer can be reused across updates.
     overlay_cache: Vec<Option<OverlayCache>>,
+    upscaler_pipeline: Option<UpscalerPipeline>,
+    width: u32,
+    height: u32,
 }
 
 struct OverlayCache {
@@ -45,6 +52,11 @@ impl RealSessionData {
             }
         }
         if let Some(pipeline) = &self.overlay_pipeline {
+            unsafe {
+                pipeline.destroy(device);
+            }
+        }
+        if let Some(pipeline) = &self.upscaler_pipeline {
             unsafe {
                 pipeline.destroy(device);
             }
@@ -128,7 +140,7 @@ impl GraphicsBackend for VulkanData {
             None
         }
     }
-    fn store_swapchain_images(&mut self, images: Vec<u64>, format: u32) {
+    fn store_swapchain_images(&mut self, images: Vec<u64>, format: u32, width: u32, height: u32) {
         let images: Vec<vk::Image> = images.into_iter().map(vk::Image::from_raw).collect();
         let image_count = images.len();
         let pool = unsafe {
@@ -160,6 +172,9 @@ impl GraphicsBackend for VulkanData {
             bufs,
             overlay_pipeline: None,
             overlay_cache: (0..image_count).map(|_| None).collect(),
+            upscaler_pipeline: None,
+            width,
+            height,
         };
 
         if let Some(old_data) = self.real_data.replace(new_data) {
@@ -199,14 +214,24 @@ impl GraphicsBackend for VulkanData {
         }
     }
 
+    fn supports_upscaler(&self) -> bool {
+        self.real_data.is_some()
+    }
+
+    fn supports_ml_upscaler(&self) -> bool {
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn copy_texture_to_swapchain(
-        &self,
+        &mut self,
         eye: vr::EVREye,
         texture: *const vr::VRVulkanTextureData_t,
         color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
         submit_flags: vr::EVRSubmitFlags,
+        params: Option<&UpscalerParams>,
     ) -> xr::Extent2Di {
         let (texture, array_data) =
             if (submit_flags & vr::EVRSubmitFlags::VulkanTextureWithArrayData).0 > 0 {
@@ -216,12 +241,64 @@ impl GraphicsBackend for VulkanData {
                 (unsafe { &*texture }, None)
             };
 
+        let (extent, offset) = texture_extent_from_bounds(texture, bounds);
+        log::trace!("{eye:?} extent: {extent:?} | bounds: {bounds:?}");
+
+        let game_image = vk::Image::from_raw(texture.m_nImage);
+        let game_layer = array_data.map(|d| d.m_unArrayIndex).unwrap_or(0);
+        let game_format = get_colorspace_corrected_format(
+            vk::Format::from_raw(texture.m_nFormat as _),
+            color_space,
+        );
+
+        if let Some(params) = params
+            && texture.m_nSampleCount == 1
+            && params.dst_width > 0
+            && params.dst_height > 0
+        {
+            let device = &self.device;
+            let data = self.real_data.as_mut().unwrap();
+            if data.upscaler_pipeline.is_none() {
+                let created = unsafe {
+                    UpscalerPipeline::new(
+                        device,
+                        data.format,
+                        &data.images,
+                        data.width,
+                        data.height,
+                    )
+                };
+                match created {
+                    Ok(pipeline) => data.upscaler_pipeline = Some(pipeline),
+                    Err(error) => {
+                        warn!("Failed to create upscaler pipeline ({error:?}); using copy path")
+                    }
+                }
+            }
+            if let Some(pipeline) = data.upscaler_pipeline.as_mut() {
+                let buf = data.bufs[2 * image_index + eye as usize];
+                Self::record_only_on(device, buf, || unsafe {
+                    pipeline.record(
+                        device,
+                        buf,
+                        image_index,
+                        eye as usize,
+                        game_image,
+                        game_format,
+                        game_layer,
+                        params,
+                    );
+                });
+                return xr::Extent2Di {
+                    width: extent.width as _,
+                    height: extent.height as _,
+                };
+            }
+        }
+
         let data = self.real_data.as_ref().unwrap();
         let swapchain_image = data.images[image_index];
         let buf = data.bufs[2 * image_index + eye as usize];
-
-        let (extent, offset) = texture_extent_from_bounds(texture, bounds);
-        log::trace!("{eye:?} extent: {extent:?} | bounds: {bounds:?}");
 
         self.record_only(buf, || unsafe {
             // transition swapchain image to TRANSFER_DST
@@ -259,9 +336,6 @@ impl GraphicsBackend for VulkanData {
                 layer_count: 1,
             };
 
-            let game_image = vk::Image::from_raw(texture.m_nImage);
-            let game_layer = array_data.map(|d| d.m_unArrayIndex).unwrap_or(0);
-
             let copy = vk::ImageResolve {
                 src_subresource: vk::ImageSubresourceLayers {
                     base_array_layer: game_layer,
@@ -276,10 +350,6 @@ impl GraphicsBackend for VulkanData {
                 extent,
             };
 
-            let game_format = get_colorspace_corrected_format(
-                vk::Format::from_raw(texture.m_nFormat as _),
-                color_space,
-            );
             if texture.m_nSampleCount > 1 {
                 self.device.cmd_resolve_image(
                     buf,
@@ -590,8 +660,12 @@ impl VulkanData {
     /// Record without submitting; staged eye copies are sent together by
     /// `flush_copies` once both eyes are in.
     pub fn record_only(&self, buf: vk::CommandBuffer, cmds: impl FnOnce()) {
+        Self::record_only_on(&self.device, buf, cmds);
+    }
+
+    fn record_only_on(device: &ash::Device, buf: vk::CommandBuffer, cmds: impl FnOnce()) {
         unsafe {
-            self.device
+            device
                 .begin_command_buffer(
                     buf,
                     &vk::CommandBufferBeginInfo::default()
@@ -603,7 +677,7 @@ impl VulkanData {
         cmds();
 
         unsafe {
-            self.device.end_command_buffer(buf).unwrap();
+            device.end_command_buffer(buf).unwrap();
         }
     }
 

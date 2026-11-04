@@ -273,6 +273,13 @@ pub fn reset_for_test() {
     LAST_POLL_MS.store(0, Ordering::Relaxed);
 }
 
+#[cfg(test)]
+pub fn set_for_test(config: UpscalerConfig) {
+    *CONFIG
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = config.sanitized();
+}
+
 /// Atomic-write friendly config locations, in priority order.
 pub fn candidate_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();

@@ -1,6 +1,7 @@
 mod gl;
 mod vulkan;
 
+use crate::upscaler::UpscalerParams;
 use derive_more::{From, TryInto};
 pub use gl::GlData;
 use openvr as vr;
@@ -30,16 +31,31 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         &mut self,
         images: Vec<<Self::Api as xr::Graphics>::SwapchainImage>,
         format: <Self::Api as xr::Graphics>::Format,
+        width: u32,
+        height: u32,
     );
 
+    /// Whether this backend can run the experimental upscaler. Keep this false
+    /// by default so backends opt in explicitly.
+    fn supports_upscaler(&self) -> bool {
+        false
+    }
+
+    /// Whether this backend can run the ML preset with the current device.
+    fn supports_ml_upscaler(&self) -> bool {
+        false
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn copy_texture_to_swapchain(
-        &self,
+        &mut self,
         eye: vr::EVREye,
         texture: Self::OpenVrTexture,
         color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
         submit_flags: vr::EVRSubmitFlags,
+        params: Option<&UpscalerParams>,
     ) -> xr::Extent2Di;
 
     /// Submit eye copies staged by `copy_texture_to_swapchain` for `image_index`
