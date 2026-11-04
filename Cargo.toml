@@ -27,7 +27,7 @@ codegen-units = 1
 strip = true
 
 [workspace]
-members = ["xbuild"]
+members = ["xbuild", "vulkan-layer", "vulkan-layer-probe"]
 
 [workspace.package]
 rust-version = "1.85"
