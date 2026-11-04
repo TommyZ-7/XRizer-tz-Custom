@@ -1351,6 +1351,13 @@ mod tests {
         drop(writer);
         assert!(dir.join("frame_000001_left.png").exists());
         assert!(dir.join("frame_000001_right.png").exists());
+        let decoder = png::Decoder::new(File::open(dir.join("frame_000001_left.png")).unwrap());
+        let mut reader = decoder.read_info().unwrap();
+        let mut pixels = vec![0; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut pixels).unwrap();
+        assert_eq!((info.width, info.height), (1, 1));
+        assert_eq!(&pixels[..4], &[255, 0, 0, 255]);
+
         let parsed: CaptureMetadata =
             serde_json::from_slice(&std::fs::read(dir.join("metadata.json")).unwrap()).unwrap();
         assert_eq!(parsed.frames.len(), 1);
