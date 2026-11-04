@@ -1,9 +1,11 @@
 //! Vulkan upscaler pipeline. Task 3 is a pass-through; later tasks add the
 //! fast/SGSR/FSR/ML variants behind the same interface.
 
+use crate::upscaler::model::Model;
 use crate::upscaler::{UpscalerParams, UpscalerPreset};
 use ash::vk;
 use ash::vk::Handle;
+use log::warn;
 use std::collections::HashMap;
 
 #[repr(C)]
@@ -43,11 +45,13 @@ pub struct UpscalerPipeline {
     output_views: Vec<[vk::ImageView; 2]>,
     framebuffers: Vec<[vk::Framebuffer; 2]>,
     source_views: HashMap<(u64, i32, u32), vk::ImageView>,
+    ml: Option<MlResources>,
     width: u32,
     height: u32,
 }
 
 impl UpscalerPipeline {
+    #[allow(clippy::too_many_arguments)]
     pub unsafe fn new(
         device: &ash::Device,
         instance: &ash::Instance,
@@ -56,6 +60,7 @@ impl UpscalerPipeline {
         images: &[vk::Image],
         width: u32,
         height: u32,
+        ml_model: Option<&Model>,
     ) -> Result<Self, vk::Result> {
         unsafe {
             let attachment = vk::AttachmentDescription {
@@ -154,10 +159,10 @@ impl UpscalerPipeline {
             )?;
             let pool = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(4)
+                    .max_sets(8)
                     .pool_sizes(&[vk::DescriptorPoolSize {
                         ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                        descriptor_count: 4,
+                        descriptor_count: 8,
                     }]),
                 None,
             )?;
@@ -296,7 +301,31 @@ impl UpscalerPipeline {
                 framebuffers.push(buffers);
             }
 
+            let ml = if let Some(model) = ml_model {
+                match MlResources::new(
+                    device,
+                    instance,
+                    physical_device,
+                    model,
+                    sampler,
+                    set_layout,
+                    pool,
+                    &intermediate_views,
+                    width,
+                    height,
+                ) {
+                    Some(ml) => Some(ml),
+                    None => {
+                        warn!("Failed to create ML upscaler resources; ML will fall back to FSR");
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+
             Ok(Self {
+                ml,
                 passthrough_pipeline,
                 fast_pipeline,
                 easu_pipeline,
@@ -434,7 +463,8 @@ impl UpscalerPipeline {
                 con3: [con[12], con[13], con[14], con[15]],
             };
 
-            if params.preset == UpscalerPreset::Fsr {
+            let use_ml = params.preset == UpscalerPreset::Ml && self.ml.is_some();
+            if params.preset == UpscalerPreset::Fsr || params.preset == UpscalerPreset::Ml {
                 device.cmd_begin_render_pass(
                     command_buffer,
                     &vk::RenderPassBeginInfo::default()
@@ -495,6 +525,16 @@ impl UpscalerPipeline {
                     }],
                 );
 
+                let mut ml_output = None;
+                if use_ml {
+                    let ml = self.ml.as_mut().unwrap();
+                    ml.update_source(device, eye, source_view);
+                    if ml.record(device, command_buffer, eye, params) {
+                        ml_output = Some(ml.output_set(eye));
+                    }
+                }
+                let rcas_set = ml_output.unwrap_or(self.intermediate_sets[eye]);
+
                 device.cmd_begin_render_pass(
                     command_buffer,
                     &vk::RenderPassBeginInfo::default()
@@ -515,7 +555,7 @@ impl UpscalerPipeline {
                     vk::PipelineBindPoint::GRAPHICS,
                     self.layout,
                     0,
-                    &[self.intermediate_sets[eye]],
+                    &[rcas_set],
                     &[],
                 );
                 device.cmd_push_constants(
@@ -593,6 +633,9 @@ impl UpscalerPipeline {
 
     pub unsafe fn destroy(&self, device: &ash::Device) {
         unsafe {
+            if let Some(ml) = &self.ml {
+                ml.destroy(device);
+            }
             for views in &self.output_views {
                 for view in views {
                     device.destroy_image_view(*view, None);
@@ -626,6 +669,501 @@ impl UpscalerPipeline {
             device.destroy_image(self.intermediate_image, None);
             device.free_memory(self.intermediate_memory, None);
         }
+    }
+}
+
+#[repr(C)]
+struct MlPushConstants {
+    src_bounds: [f32; 4],
+    center: [f32; 2],
+    radius: f32,
+    feather: f32,
+    strength: f32,
+    flags: u32,
+    dst_width: u32,
+    dst_height: u32,
+    ml_origin: [u32; 2],
+    ml_size: [u32; 2],
+    hidden: u32,
+    input_scale: f32,
+    activation_limit: f32,
+    output_scale: f32,
+    residual_clamp: f32,
+    scale: f32,
+}
+
+struct MlResources {
+    image: vk::Image,
+    memory: vk::DeviceMemory,
+    views: [vk::ImageView; 2],
+    pipeline: vk::Pipeline,
+    layout: vk::PipelineLayout,
+    set_layout: vk::DescriptorSetLayout,
+    pool: vk::DescriptorPool,
+    sets: [vk::DescriptorSet; 2],
+    output_sets: [vk::DescriptorSet; 2],
+    weights_buffer: vk::Buffer,
+    weights_memory: vk::DeviceMemory,
+    sampler: vk::Sampler,
+    weight_count: u32,
+    hidden: u32,
+    input_scale: f32,
+    output_scale: f32,
+    residual_clamp: f32,
+    scale: f32,
+    initialized: bool,
+}
+
+impl MlResources {
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn new(
+        device: &ash::Device,
+        instance: &ash::Instance,
+        physical_device: vk::PhysicalDevice,
+        model: &Model,
+        sampler: vk::Sampler,
+        output_set_layout: vk::DescriptorSetLayout,
+        output_pool: vk::DescriptorPool,
+        base_views: &[vk::ImageView; 2],
+        width: u32,
+        height: u32,
+    ) -> Option<Self> {
+        unsafe {
+            let packed = model.packed_mlp_weights()?;
+            let (image, memory) = create_image(
+                device,
+                instance,
+                physical_device,
+                vk::Format::R8G8B8A8_UNORM,
+                width,
+                height,
+                2,
+                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+            )
+            .ok()?;
+            let mut views = [vk::ImageView::null(); 2];
+            for (eye, view) in views.iter_mut().enumerate() {
+                *view = device
+                    .create_image_view(
+                        &vk::ImageViewCreateInfo::default()
+                            .image(image)
+                            .view_type(vk::ImageViewType::TYPE_2D)
+                            .format(vk::Format::R8G8B8A8_UNORM)
+                            .components(vk::ComponentMapping::default())
+                            .subresource_range(vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: eye as u32,
+                                layer_count: 1,
+                            }),
+                        None,
+                    )
+                    .ok()?;
+            }
+
+            let weights_size = (packed.len() * 4) as u64;
+            let (weights_buffer, weights_memory) = create_buffer(
+                device,
+                instance,
+                physical_device,
+                weights_size,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+            )
+            .ok()?;
+            let pointer = device
+                .map_memory(weights_memory, 0, weights_size, vk::MemoryMapFlags::empty())
+                .ok()?;
+            std::ptr::copy_nonoverlapping(
+                packed.as_ptr() as *const u8,
+                pointer.cast::<u8>(),
+                packed.len() * 4,
+            );
+            device.unmap_memory(weights_memory);
+
+            let bindings = [
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(1)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(2)
+                    .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(3)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE),
+            ];
+            let set_layout = device
+                .create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+                    None,
+                )
+                .ok()?;
+            let pool = device
+                .create_descriptor_pool(
+                    &vk::DescriptorPoolCreateInfo::default()
+                        .max_sets(2)
+                        .pool_sizes(&[
+                            vk::DescriptorPoolSize {
+                                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                                descriptor_count: 4,
+                            },
+                            vk::DescriptorPoolSize {
+                                ty: vk::DescriptorType::STORAGE_IMAGE,
+                                descriptor_count: 2,
+                            },
+                            vk::DescriptorPoolSize {
+                                ty: vk::DescriptorType::STORAGE_BUFFER,
+                                descriptor_count: 2,
+                            },
+                        ]),
+                    None,
+                )
+                .ok()?;
+            let sets = device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(pool)
+                        .set_layouts(&[set_layout, set_layout]),
+                )
+                .ok()?;
+            let sets = [sets[0], sets[1]];
+
+            let push_constant_range = vk::PushConstantRange {
+                stage_flags: vk::ShaderStageFlags::COMPUTE,
+                offset: 0,
+                size: std::mem::size_of::<MlPushConstants>() as u32,
+            };
+            let layout = device
+                .create_pipeline_layout(
+                    &vk::PipelineLayoutCreateInfo::default()
+                        .set_layouts(std::slice::from_ref(&set_layout))
+                        .push_constant_ranges(std::slice::from_ref(&push_constant_range)),
+                    None,
+                )
+                .ok()?;
+            let pipeline = create_compute_pipeline(
+                device,
+                layout,
+                &include_bytes!(concat!(env!("OUT_DIR"), "/comp_mlp_dp4a.spv"))[..],
+            )
+            .ok()?;
+
+            for eye in 0..2 {
+                device.update_descriptor_sets(
+                    &[
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(sets[eye])
+                            .dst_binding(1)
+                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                            .image_info(&[vk::DescriptorImageInfo {
+                                sampler,
+                                image_view: base_views[eye],
+                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            }]),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(sets[eye])
+                            .dst_binding(2)
+                            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+                            .image_info(&[vk::DescriptorImageInfo {
+                                sampler: vk::Sampler::null(),
+                                image_view: views[eye],
+                                image_layout: vk::ImageLayout::GENERAL,
+                            }]),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(sets[eye])
+                            .dst_binding(3)
+                            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                            .buffer_info(&[vk::DescriptorBufferInfo {
+                                buffer: weights_buffer,
+                                offset: 0,
+                                range: weights_size,
+                            }]),
+                    ],
+                    &[],
+                );
+            }
+
+            let output_sets = device
+                .allocate_descriptor_sets(
+                    &vk::DescriptorSetAllocateInfo::default()
+                        .descriptor_pool(output_pool)
+                        .set_layouts(&[output_set_layout, output_set_layout]),
+                )
+                .ok()?;
+            let output_sets = [output_sets[0], output_sets[1]];
+            for eye in 0..2 {
+                device.update_descriptor_sets(
+                    &[vk::WriteDescriptorSet::default()
+                        .dst_set(output_sets[eye])
+                        .dst_binding(0)
+                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                        .image_info(&[vk::DescriptorImageInfo {
+                            sampler,
+                            image_view: views[eye],
+                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        }])],
+                    &[],
+                );
+            }
+
+            Some(Self {
+                image,
+                memory,
+                views,
+                pipeline,
+                layout,
+                set_layout,
+                pool,
+                sets,
+                output_sets,
+                weights_buffer,
+                weights_memory,
+                sampler,
+                weight_count: packed.len() as u32,
+                hidden: model.layers[0].output_count,
+                input_scale: model.input_scale,
+                output_scale: model.mlp_output_scale(),
+                residual_clamp: model.residual_clamp,
+                scale: model.scale,
+                initialized: false,
+            })
+        }
+    }
+
+    unsafe fn update_source(&self, device: &ash::Device, eye: usize, view: vk::ImageView) {
+        unsafe {
+            device.update_descriptor_sets(
+                &[vk::WriteDescriptorSet::default()
+                    .dst_set(self.sets[eye])
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .image_info(&[vk::DescriptorImageInfo {
+                        sampler: self.sampler,
+                        image_view: view,
+                        image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    }])],
+                &[],
+            );
+        }
+    }
+
+    unsafe fn record(
+        &mut self,
+        device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        eye: usize,
+        params: &UpscalerParams,
+    ) -> bool {
+        unsafe {
+            let (origin_x, origin_y, width, height) = params.ml_bounds(0.001);
+            if width == 0 || height == 0 || self.weight_count == 0 {
+                return false;
+            }
+            let range = vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: eye as u32,
+                layer_count: 1,
+            };
+            let old_layout = if self.initialized {
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
+            } else {
+                vk::ImageLayout::UNDEFINED
+            };
+            let (src_stage, src_access) = if self.initialized {
+                (
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::AccessFlags::SHADER_READ,
+                )
+            } else {
+                (
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::AccessFlags::empty(),
+                )
+            };
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                src_stage,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier {
+                    src_access_mask: src_access,
+                    dst_access_mask: vk::AccessFlags::SHADER_WRITE,
+                    old_layout,
+                    new_layout: vk::ImageLayout::GENERAL,
+                    image: self.image,
+                    subresource_range: range,
+                    ..Default::default()
+                }],
+            );
+
+            let push = MlPushConstants {
+                src_bounds: [
+                    params.src_bounds.uMin,
+                    params.src_bounds.vMin,
+                    params.src_bounds.uMax,
+                    params.src_bounds.vMax,
+                ],
+                center: params.center,
+                radius: params.radius,
+                feather: params.feather,
+                strength: params.strength,
+                flags: params.flags(),
+                dst_width: params.dst_width,
+                dst_height: params.dst_height,
+                ml_origin: [origin_x, origin_y],
+                ml_size: [width, height],
+                hidden: self.hidden,
+                input_scale: self.input_scale,
+                activation_limit: 127.0,
+                output_scale: self.output_scale,
+                residual_clamp: self.residual_clamp,
+                scale: self.scale,
+            };
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline,
+            );
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::COMPUTE,
+                self.layout,
+                0,
+                &[self.sets[eye]],
+                &[],
+            );
+            device.cmd_push_constants(
+                command_buffer,
+                self.layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                std::slice::from_raw_parts(
+                    (&raw const push).cast::<u8>(),
+                    std::mem::size_of::<MlPushConstants>(),
+                ),
+            );
+            device.cmd_dispatch(command_buffer, width.div_ceil(8), height.div_ceil(8), 1);
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier {
+                    src_access_mask: vk::AccessFlags::SHADER_WRITE,
+                    dst_access_mask: vk::AccessFlags::SHADER_READ,
+                    old_layout: vk::ImageLayout::GENERAL,
+                    new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    image: self.image,
+                    subresource_range: range,
+                    ..Default::default()
+                }],
+            );
+            self.initialized = true;
+            true
+        }
+    }
+
+    fn output_set(&self, eye: usize) -> vk::DescriptorSet {
+        self.output_sets[eye]
+    }
+
+    unsafe fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            for view in &self.views {
+                device.destroy_image_view(*view, None);
+            }
+            device.destroy_image(self.image, None);
+            device.free_memory(self.memory, None);
+            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline_layout(self.layout, None);
+            device.destroy_descriptor_set_layout(self.set_layout, None);
+            device.destroy_descriptor_pool(self.pool, None);
+            device.destroy_buffer(self.weights_buffer, None);
+            device.free_memory(self.weights_memory, None);
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn create_buffer(
+    device: &ash::Device,
+    instance: &ash::Instance,
+    physical_device: vk::PhysicalDevice,
+    size: u64,
+    usage: vk::BufferUsageFlags,
+) -> Result<(vk::Buffer, vk::DeviceMemory), vk::Result> {
+    unsafe {
+        let buffer = device.create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(size)
+                .usage(usage)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE),
+            None,
+        )?;
+        let requirements = device.get_buffer_memory_requirements(buffer);
+        let properties = instance.get_physical_device_memory_properties(physical_device);
+        let memory_type = (0..properties.memory_type_count)
+            .find(|index| {
+                requirements.memory_type_bits & (1 << index) != 0
+                    && properties.memory_types[*index as usize]
+                        .property_flags
+                        .contains(
+                            vk::MemoryPropertyFlags::HOST_VISIBLE
+                                | vk::MemoryPropertyFlags::HOST_COHERENT,
+                        )
+            })
+            .expect("ML weights need host-visible coherent memory");
+        let memory = device.allocate_memory(
+            &vk::MemoryAllocateInfo::default()
+                .allocation_size(requirements.size)
+                .memory_type_index(memory_type),
+            None,
+        )?;
+        device.bind_buffer_memory(buffer, memory, 0)?;
+        Ok((buffer, memory))
+    }
+}
+
+unsafe fn create_compute_pipeline(
+    device: &ash::Device,
+    layout: vk::PipelineLayout,
+    bytes: &[u8],
+) -> Result<vk::Pipeline, vk::Result> {
+    unsafe {
+        let module = create_shader_module(device, bytes)?;
+        let stage = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(module)
+            .name(c"main");
+        let info = vk::ComputePipelineCreateInfo::default()
+            .stage(stage)
+            .layout(layout);
+        let result = device.create_compute_pipelines(
+            vk::PipelineCache::null(),
+            std::slice::from_ref(&info),
+            None,
+        );
+        device.destroy_shader_module(module, None);
+        result
+            .map_err(|(_, error)| error)
+            .map(|pipelines| pipelines[0])
     }
 }
 

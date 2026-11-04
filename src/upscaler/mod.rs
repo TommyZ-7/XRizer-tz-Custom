@@ -5,6 +5,7 @@
 //! tested on the CPU.
 
 pub mod math;
+pub mod model;
 
 use openvr as vr;
 use serde::{Deserialize, Serialize};

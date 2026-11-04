@@ -8,7 +8,7 @@ use openvr as vr;
 use openxr as xr;
 use std::collections::HashSet;
 use std::ffi::{CString, c_char};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
 use upscaler::UpscalerPipeline;
 
 struct RealSessionData {
@@ -75,6 +75,7 @@ pub struct VulkanData {
     pub device: ash::Device,
     pub queue: vk::Queue,
     pub queue_family_index: u32,
+    ml_feature_supported: OnceLock<bool>,
     real_data: Option<RealSessionData>,
 }
 
@@ -223,7 +224,24 @@ impl GraphicsBackend for VulkanData {
     }
 
     fn supports_ml_upscaler(&self) -> bool {
-        false
+        *self.ml_feature_supported.get_or_init(|| unsafe {
+            let mut dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures {
+                shader_integer_dot_product: vk::FALSE,
+                ..Default::default()
+            };
+            let mut vulkan13 = vk::PhysicalDeviceVulkan13Features {
+                p_next: (&raw mut dot).cast(),
+                ..Default::default()
+            };
+            let mut features2 = vk::PhysicalDeviceFeatures2 {
+                p_next: (&raw mut vulkan13).cast(),
+                ..Default::default()
+            };
+            self.instance
+                .get_physical_device_features2(self.physical_device, &mut features2);
+            vulkan13.shader_integer_dot_product == vk::TRUE
+                || dot.shader_integer_dot_product == vk::TRUE
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -263,6 +281,21 @@ impl GraphicsBackend for VulkanData {
             let device = &self.device;
             let data = self.real_data.as_mut().unwrap();
             if data.upscaler_pipeline.is_none() {
+                let ml_model = if params.preset == crate::upscaler::UpscalerPreset::Ml {
+                    let config = crate::upscaler::snapshot();
+                    let path = config
+                        .model_path
+                        .unwrap_or_else(crate::upscaler::model::default_model_path);
+                    match crate::upscaler::model::load_cached(&path) {
+                        Ok(model) => Some(model),
+                        Err(error) => {
+                            warn!("ML model unavailable ({error}); falling back to FSR");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
                 let created = unsafe {
                     UpscalerPipeline::new(
                         device,
@@ -272,6 +305,7 @@ impl GraphicsBackend for VulkanData {
                         &data.images,
                         data.width,
                         data.height,
+                        ml_model.as_deref(),
                     )
                 };
                 match created {
@@ -733,6 +767,7 @@ impl VulkanData {
             device,
             queue: vk::Queue::from_raw(data.m_pQueue as _),
             queue_family_index: data.m_nQueueFamilyIndex,
+            ml_feature_supported: OnceLock::new(),
             real_data: Default::default(),
         }
     }
@@ -813,6 +848,7 @@ impl VulkanData {
             device,
             queue,
             queue_family_index,
+            ml_feature_supported: OnceLock::new(),
             real_data: Default::default(),
         }
     }

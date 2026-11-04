@@ -1301,7 +1301,11 @@ impl<G: GraphicsBackend> FrameController<G> {
                                 input_sample_count,
                             ) {
                             let base = base_size.unwrap_or((input_width, input_height));
-                            upscaler_config.params_for_size(base.0, base.1, bounds)
+                            upscaler_config
+                                .params_for_size(base.0, base.1, bounds)
+                                .map(|params| {
+                                    params.with_fallback(self.backend.supports_ml_upscaler())
+                                })
                         } else {
                             None
                         };
@@ -1753,6 +1757,15 @@ mod tests {
             ctrl.backend.flushes.load(Ordering::Relaxed)
         }
 
+        fn fake_supports_ml(&self) -> bool {
+            let data = self.comp.openxr.session_data.get();
+            let lock = data.comp_data.0.lock().unwrap();
+            let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
+                panic!("Frame controller was not set up or not faked!");
+            };
+            ctrl.backend.supports_ml_upscaler()
+        }
+
         fn swapchain_size(&self) -> (u32, u32) {
             let data = self.comp.openxr.session_data.get();
             let lock = data.comp_data.0.lock().unwrap();
@@ -1882,6 +1895,31 @@ mod tests {
 
         SWAPCHAIN_WIDTH.set(10);
         SWAPCHAIN_HEIGHT.set(10);
+        crate::upscaler::reset_for_test();
+    }
+
+    #[test]
+    fn ml_preset_falls_back_when_backend_lacks_dp4a() {
+        let _guard = crate::upscaler::test_lock();
+        crate::upscaler::reset_for_test();
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        f.set_fake_supports_upscaler(true);
+        crate::upscaler::set_for_test(crate::upscaler::UpscalerConfig {
+            enabled: true,
+            preset: crate::upscaler::UpscalerPreset::Ml,
+            ..Default::default()
+        });
+
+        assert_eq!(f.wait_get_poses(), None);
+        f.set_should_render(true);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        let params = f.last_upscaler_params().expect("params should be recorded");
+        assert!(!f.fake_supports_ml());
+        assert_eq!(params.preset, crate::upscaler::UpscalerPreset::Fsr);
+        assert_eq!(params.shader_kind(), 2);
+
         crate::upscaler::reset_for_test();
     }
 
