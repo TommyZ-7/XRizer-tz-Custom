@@ -216,6 +216,33 @@ XRIZER_UPSCALER_VK_LAYER_DISABLE=1
 
 `VK_LOADER_DEBUG=layer` shows whether `VK_LAYER_XRIZER_upscaler` was loaded. If the layer is absent, disabled, or declines a feature, ML falls back to FSR 1; the game must still start.
 
+Example `~/.config/xrizer/upscaler.json`:
+
+```json
+{
+  "enabled": true,
+  "preset": "fsr",
+  "center": [0.5, 0.5],
+  "radius": 0.35,
+  "feather": 0.10,
+  "strength": 1.0,
+  "output_scale": 1.0,
+  "preserve_alpha": true,
+  "compare": false,
+  "show_region": false,
+  "model_path": null,
+  "auto_scale": false,
+  "min_scale": 0.5,
+  "max_scale": 1.5
+}
+```
+
+Recommended starting point: `xrizer_scale=0.7` (the game renders at 70 %, XRizer upscales to the runtime-recommended size). For full-frame enhancement use `radius: 2.0, feather: 0.0`. `auto_scale` adjusts `xrizer_scale` in 0.05 steps with 30-frame slow / 60-frame fast hysteresis and clamps to `min_scale..max_scale`.
+
+Diagnostics are counters only (no image contents): frames, upscaled frames, fast/SGSR/FSR/MLP/CNN/SRPO counts, fallback count, and the last fallback reason. A summary is logged every 300 frames to `$XDG_STATE_HOME/xrizer/xrizer.txt`.
+
+Budget and limits: aim for <=1.0 ms stereo total and <=0.5 ms typical. ML is dispatched only inside the radial weight bounding box; the runtime kill-switch falls back to FSR/SGSR when the feature, model, or pipeline is unavailable. The upscaler runs before runtime lens distortion and only on the game projection layer, so overlays are never sharpened. It is Vulkan-only for now; OpenGL keeps the old copy path. FSR 1 expects anti-aliased, post-tonemap input. There is no engine history, motion vector, or depth input, so temporal shimmer must be controlled by residual clamping and evaluated on video. MSAA submissions take the existing resolve path. Dynamic render scale does not resize the output swapchain.
+
 The version xrizer reports comes from `git describe`, via the default `git-version` feature. Builds that don't have a git checkout - distribution packages and other builds from a source tarball - can disable that feature with `--no-default-features` (re-enabling the other default features they want, e.g. `--features monado`) and set `XRIZER_VERSION` at build time instead. `XRIZER_VERSION` takes precedence over `git describe` whenever it is set.
 
 # Contributing

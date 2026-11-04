@@ -147,6 +147,33 @@ XRIZER_UPSCALER_VK_LAYER_DISABLE=1
 
 `VK_LOADER_DEBUG=layer` で `VK_LAYER_XRIZER_upscaler` がロードされたか確認できます。レイヤーがない／無効／機能を追加できない場合は ML が FSR 1 にフォールバックし、ゲームは起動し続けます。
 
+`~/.config/xrizer/upscaler.json` の例:
+
+```json
+{
+  "enabled": true,
+  "preset": "fsr",
+  "center": [0.5, 0.5],
+  "radius": 0.35,
+  "feather": 0.10,
+  "strength": 1.0,
+  "output_scale": 1.0,
+  "preserve_alpha": true,
+  "compare": false,
+  "show_region": false,
+  "model_path": null,
+  "auto_scale": false,
+  "min_scale": 0.5,
+  "max_scale": 1.5
+}
+```
+
+推奨開始点は `xrizer_scale=0.7`（ゲームが 70% で描画し、XRizer がランタイム推奨サイズへ拡大）。全面補正は `radius: 2.0, feather: 0.0`。`auto_scale` は 0.05 刻みで `xrizer_scale` を調整し、30 フレームの低速／60 フレームの高速ヒステリシスと `min_scale..max_scale` のクランプを使います。
+
+診断はカウンタのみ（画像内容なし）: フレーム数、アップスケール数、fast/SGSR/FSR/MLP/CNN/SRPO、フォールバック数、最後の理由。300 フレームごとに `$XDG_STATE_HOME/xrizer/xrizer.txt` へ要約を記録します。
+
+予算と制限: ステレオ合計 <=1.0 ms、通常 <=0.5 ms を目標。ML は半径方向の重みの外接矩形内だけにディスパッチし、機能／モデル／パイプラインがない場合は FSR/SGSR にフォールバックします。ランタイムのレンズ歪み前に、ゲームのプロジェクションレイヤーだけを処理するため、オーバーレイは強調されません。現状 Vulkan のみで、OpenGL は従来のコピー経路です。FSR 1 はアンチエイリアス済み・トーンマップ後の入力を前提とします。エンジンの履歴・モーションベクタ・深度はないため、時間方向のちらつきは残差クランプとビデオ評価で抑えます。MSAA は既存の resolve 経路、動的解像度変更でも出力スワップチェーンは再作成しません。
+
 ## 4. パフォーマンス改善
 
 * 両目のコピーを 1 回の submit にまとめ、フレーム毎のオーバーヘッドを削減。

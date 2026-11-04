@@ -706,6 +706,7 @@ struct MlResources {
     weights_memory: vk::DeviceMemory,
     sampler: vk::Sampler,
     weight_count: u32,
+    kind: ModelKind,
     hidden: u32,
     input_scale: f32,
     output_scale: f32,
@@ -945,6 +946,7 @@ impl MlResources {
                 weights_memory,
                 sampler,
                 weight_count: packed.len() as u32,
+                kind: model.kind,
                 hidden,
                 input_scale: model.input_scale,
                 output_scale,
@@ -1090,6 +1092,7 @@ impl MlResources {
                 }],
             );
             self.initialized = true;
+            crate::upscaler::diagnostics::record_ml_model(self.kind);
             true
         }
     }

@@ -4,6 +4,8 @@
 //! continuous weight field, fallback selection, and hot-reload behaviour can be
 //! tested on the CPU.
 
+pub mod auto_scale;
+pub mod diagnostics;
 pub mod inner_loop;
 pub mod math;
 pub mod model;
@@ -64,6 +66,10 @@ pub struct UpscalerConfig {
     /// Draw the full-weight contour at `radius`.
     pub show_region: bool,
     pub model_path: Option<PathBuf>,
+    /// Adjust the game's supersample scale from frame timing.
+    pub auto_scale: bool,
+    pub min_scale: f32,
+    pub max_scale: f32,
 }
 
 impl Default for UpscalerConfig {
@@ -80,6 +86,9 @@ impl Default for UpscalerConfig {
             compare: false,
             show_region: false,
             model_path: None,
+            auto_scale: false,
+            min_scale: 0.5,
+            max_scale: 1.5,
         }
     }
 }
@@ -99,7 +108,25 @@ impl UpscalerConfig {
             feather: sanitize_finite(self.feather, default.feather).clamp(0.0, 1.0),
             strength: sanitize_finite(self.strength, default.strength).clamp(0.0, 3.0),
             output_scale: sanitize_finite(self.output_scale, default.output_scale).clamp(0.5, 2.0),
+            min_scale: sanitize_finite(self.min_scale, default.min_scale).clamp(0.1, 4.0),
+            max_scale: sanitize_finite(self.max_scale, default.max_scale).clamp(0.1, 4.0),
             ..self
+        }
+        .normalize_scale_bounds()
+    }
+
+    fn normalize_scale_bounds(mut self) -> Self {
+        if self.min_scale > self.max_scale {
+            std::mem::swap(&mut self.min_scale, &mut self.max_scale);
+        }
+        self
+    }
+
+    pub fn auto_scale_config(&self) -> crate::upscaler::auto_scale::AutoScaleConfig {
+        crate::upscaler::auto_scale::AutoScaleConfig {
+            min_scale: self.min_scale,
+            max_scale: self.max_scale,
+            ..Default::default()
         }
     }
 
@@ -428,6 +455,9 @@ mod tests {
         assert!(!c.compare);
         assert!(!c.show_region);
         assert_eq!(c.model_path, None);
+        assert!(!c.auto_scale);
+        assert_eq!(c.min_scale, 0.5);
+        assert_eq!(c.max_scale, 1.5);
     }
 
     #[test]
@@ -438,6 +468,8 @@ mod tests {
             feather: 9.0,
             strength: 99.0,
             output_scale: 9.0,
+            min_scale: 9.0,
+            max_scale: 0.0,
             ..Default::default()
         }
         .sanitized();
@@ -446,6 +478,8 @@ mod tests {
         assert_eq!(c.feather, 1.0);
         assert_eq!(c.strength, 3.0);
         assert_eq!(c.output_scale, 2.0);
+        assert_eq!(c.min_scale, 0.1);
+        assert_eq!(c.max_scale, 4.0);
     }
 
     #[test]
@@ -780,6 +814,9 @@ mod tests {
             compare: true,
             show_region: true,
             model_path: Some("/tmp/model.xru".into()),
+            auto_scale: true,
+            min_scale: 0.6,
+            max_scale: 1.4,
         };
         let json = serde_json::to_string(&c).unwrap();
         let parsed: UpscalerConfig = serde_json::from_str(&json).unwrap();

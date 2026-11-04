@@ -40,6 +40,8 @@ pub struct Compositor {
     timing_mode: Mutex<vr::EVRCompositorTimingMode>,
     frame_state: Mutex<FrameState>,
     focused: Once,
+    last_auto_scale_frame: Mutex<Option<Instant>>,
+    auto_scale_controller: Mutex<crate::upscaler::auto_scale::AutoScaleController>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -96,6 +98,12 @@ impl Compositor {
             timing_mode: vr::EVRCompositorTimingMode::Implicit.into(),
             frame_state: FrameState::Submitted.into(),
             focused: Once::new(),
+            last_auto_scale_frame: Mutex::new(None),
+            auto_scale_controller: Mutex::new(
+                crate::upscaler::auto_scale::AutoScaleController::new(
+                    crate::settings::current_supersample_scale(),
+                ),
+            ),
         }
     }
 
@@ -148,6 +156,29 @@ impl Compositor {
         }
 
         ctrl.with_any_graphics_mut::<begin_frame>(());
+    }
+
+    fn update_auto_scale(&self) {
+        let config = crate::upscaler::snapshot();
+        if !config.enabled || !config.auto_scale {
+            return;
+        }
+        let target_ms =
+            self.openxr.display_period_nanos.load(Ordering::Relaxed) as f32 / 1_000_000.0;
+        if target_ms <= 0.0 {
+            return;
+        }
+        let now = Instant::now();
+        let mut last = self.last_auto_scale_frame.lock().unwrap();
+        let Some(previous) = last.replace(now) else {
+            return;
+        };
+        let frame_ms = now.duration_since(previous).as_secs_f32() * 1000.0;
+        let mut controller = self.auto_scale_controller.lock().unwrap();
+        if let Some(scale) = controller.update(frame_ms, target_ms, config.auto_scale_config()) {
+            crate::settings::set_supersample_scale(scale);
+            log::info!("auto-scale: supersampleScale={scale:.2}");
+        }
     }
 
     pub fn initialize_real_session(
@@ -835,6 +866,9 @@ impl vr::IVRCompositor029_Interface for Compositor {
         )) {
             return e;
         }
+        if eye == vr::EVREye::Right {
+            self.update_auto_scale();
+        }
         vr::EVRCompositorError::None
     }
 
@@ -1354,6 +1388,9 @@ impl<G: GraphicsBackend> FrameController<G> {
             // Null/inert frames record nothing, so there is nothing to flush.
             if self.should_render && !self.submitting_null {
                 self.backend.flush_copies(self.image_index);
+                if let Some(params) = self.frame_upscaler_params {
+                    crate::upscaler::diagnostics::record_frame(params.preset, params.enabled);
+                }
             }
             // If the session was restarted while no frame was begun, nothing has been acquired from the new swapchain yet, so there is nothing to release
             if self.image_acquired

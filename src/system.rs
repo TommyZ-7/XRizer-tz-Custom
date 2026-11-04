@@ -199,8 +199,7 @@ impl vr::IVRSystem026_Interface for System {
         let base = self.openxr.base_recommended_view_size();
 
         // ponytail: global scale, per-app map if needed
-        crate::settings::maybe_reload_scale();
-        let scale = crate::settings::SUPERSAMPLE_SCALE.load(Ordering::Relaxed) as f32 / 100.0;
+        let scale = crate::settings::current_supersample_scale();
         let (scaled_width, scaled_height) = crate::settings::apply_render_scale(base, scale);
 
         if !width.is_null() {
