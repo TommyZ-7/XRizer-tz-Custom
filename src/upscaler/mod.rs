@@ -648,6 +648,18 @@ mod tests {
     }
 
     #[test]
+    fn params_uses_recommended_size_and_output_scale() {
+        let b = full_bounds();
+        let c = UpscalerConfig {
+            enabled: true,
+            output_scale: 0.8,
+            ..Default::default()
+        };
+        let p = c.params_for_size(2000, 1600, b).unwrap();
+        assert_eq!((p.dst_width, p.dst_height), (1600, 1280));
+    }
+
+    #[test]
     fn json_roundtrip_and_bad_json_is_error() {
         let c = UpscalerConfig {
             enabled: true,

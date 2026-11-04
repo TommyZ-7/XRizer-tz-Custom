@@ -1,7 +1,7 @@
 //! Vulkan upscaler pipeline. Task 3 is a pass-through; later tasks add the
 //! fast/SGSR/FSR/ML variants behind the same interface.
 
-use crate::upscaler::UpscalerParams;
+use crate::upscaler::{UpscalerParams, UpscalerPreset};
 use ash::vk;
 use ash::vk::Handle;
 use std::collections::HashMap;
@@ -19,7 +19,8 @@ struct PushConstants {
 }
 
 pub struct UpscalerPipeline {
-    pipeline: vk::Pipeline,
+    passthrough_pipeline: vk::Pipeline,
+    fast_pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
     render_pass: vk::RenderPass,
     set_layout: vk::DescriptorSetLayout,
@@ -104,72 +105,30 @@ impl UpscalerPipeline {
                 None,
             )?;
 
-            let vertex_words = ash::util::read_spv(&mut std::io::Cursor::new(
+            let vertex_module = create_shader_module(
+                device,
                 &include_bytes!(concat!(env!("OUT_DIR"), "/vert_upscaler.spv"))[..],
-            ))
-            .expect("valid upscaler vertex shader");
-            let vertex_module = device.create_shader_module(
-                &vk::ShaderModuleCreateInfo::default().code(&vertex_words),
-                None,
             )?;
-            let fragment_words = ash::util::read_spv(&mut std::io::Cursor::new(
+            let passthrough_module = create_shader_module(
+                device,
                 &include_bytes!(concat!(env!("OUT_DIR"), "/frag_upscaler.spv"))[..],
-            ))
-            .expect("valid upscaler fragment shader");
-            let fragment_module = device.create_shader_module(
-                &vk::ShaderModuleCreateInfo::default().code(&fragment_words),
-                None,
             )?;
-            let stages = [
-                vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::VERTEX)
-                    .module(vertex_module)
-                    .name(c"main"),
-                vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::FRAGMENT)
-                    .module(fragment_module)
-                    .name(c"main"),
-            ];
-            let input_state = vk::PipelineVertexInputStateCreateInfo::default();
-            let assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
-                .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
-            let viewport_state = vk::PipelineViewportStateCreateInfo::default()
-                .viewport_count(1)
-                .scissor_count(1);
-            let raster_state = vk::PipelineRasterizationStateCreateInfo::default()
-                .cull_mode(vk::CullModeFlags::NONE)
-                .line_width(1.0);
-            let multisample_state = vk::PipelineMultisampleStateCreateInfo::default();
-            let blend = vk::PipelineColorBlendAttachmentState {
-                blend_enable: vk::FALSE,
-                color_write_mask: vk::ColorComponentFlags::RGBA,
-                ..Default::default()
-            };
-            let blend_state = vk::PipelineColorBlendStateCreateInfo::default()
-                .attachments(std::slice::from_ref(&blend));
-            let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-            let dynamic_state =
-                vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-            let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
-                .stages(&stages)
-                .vertex_input_state(&input_state)
-                .input_assembly_state(&assembly_state)
-                .viewport_state(&viewport_state)
-                .rasterization_state(&raster_state)
-                .multisample_state(&multisample_state)
-                .color_blend_state(&blend_state)
-                .dynamic_state(&dynamic_state)
-                .render_pass(render_pass)
-                .subpass(0)
-                .layout(layout);
-            let pipeline = device.create_graphics_pipelines(
-                vk::PipelineCache::null(),
-                std::slice::from_ref(&pipeline_info),
-                None,
-            );
+            let fast_module = create_shader_module(
+                device,
+                &include_bytes!(concat!(env!("OUT_DIR"), "/frag_fast.spv"))[..],
+            )?;
+            let passthrough_pipeline = create_graphics_pipeline(
+                device,
+                render_pass,
+                layout,
+                vertex_module,
+                passthrough_module,
+            )?;
+            let fast_pipeline =
+                create_graphics_pipeline(device, render_pass, layout, vertex_module, fast_module)?;
             device.destroy_shader_module(vertex_module, None);
-            device.destroy_shader_module(fragment_module, None);
-            let pipeline = pipeline.map_err(|(_, error)| error)?[0];
+            device.destroy_shader_module(passthrough_module, None);
+            device.destroy_shader_module(fast_module, None);
 
             let sampler = device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -221,7 +180,8 @@ impl UpscalerPipeline {
             }
 
             Ok(Self {
-                pipeline,
+                passthrough_pipeline,
+                fast_pipeline,
                 layout,
                 render_pass,
                 set_layout,
@@ -328,11 +288,15 @@ impl UpscalerPipeline {
                     .render_area(render_area),
                 vk::SubpassContents::INLINE,
             );
-            device.cmd_bind_pipeline(
-                command_buffer,
-                vk::PipelineBindPoint::GRAPHICS,
-                self.pipeline,
-            );
+            let pipeline = if matches!(
+                params.preset,
+                UpscalerPreset::Fast | UpscalerPreset::Balanced
+            ) {
+                self.fast_pipeline
+            } else {
+                self.passthrough_pipeline
+            };
+            device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline);
             device.cmd_set_viewport(
                 command_buffer,
                 0,
@@ -419,10 +383,83 @@ impl UpscalerPipeline {
             }
             device.destroy_sampler(self.sampler, None);
             device.destroy_descriptor_pool(self.pool, None);
-            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline(self.passthrough_pipeline, None);
+            device.destroy_pipeline(self.fast_pipeline, None);
             device.destroy_pipeline_layout(self.layout, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
             device.destroy_render_pass(self.render_pass, None);
         }
+    }
+}
+
+unsafe fn create_shader_module(
+    device: &ash::Device,
+    bytes: &[u8],
+) -> Result<vk::ShaderModule, vk::Result> {
+    unsafe {
+        let words =
+            ash::util::read_spv(&mut std::io::Cursor::new(bytes)).expect("valid upscaler shader");
+        device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
+    }
+}
+
+unsafe fn create_graphics_pipeline(
+    device: &ash::Device,
+    render_pass: vk::RenderPass,
+    layout: vk::PipelineLayout,
+    vertex_module: vk::ShaderModule,
+    fragment_module: vk::ShaderModule,
+) -> Result<vk::Pipeline, vk::Result> {
+    unsafe {
+        let stages = [
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vertex_module)
+                .name(c"main"),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(fragment_module)
+                .name(c"main"),
+        ];
+        let input_state = vk::PipelineVertexInputStateCreateInfo::default();
+        let assembly_state = vk::PipelineInputAssemblyStateCreateInfo::default()
+            .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+        let viewport_state = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
+        let raster_state = vk::PipelineRasterizationStateCreateInfo::default()
+            .cull_mode(vk::CullModeFlags::NONE)
+            .line_width(1.0);
+        let multisample_state = vk::PipelineMultisampleStateCreateInfo::default();
+        let blend = vk::PipelineColorBlendAttachmentState {
+            blend_enable: vk::FALSE,
+            color_write_mask: vk::ColorComponentFlags::RGBA,
+            ..Default::default()
+        };
+        let blend_state = vk::PipelineColorBlendStateCreateInfo::default()
+            .attachments(std::slice::from_ref(&blend));
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_state =
+            vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        let pipeline_info = vk::GraphicsPipelineCreateInfo::default()
+            .stages(&stages)
+            .vertex_input_state(&input_state)
+            .input_assembly_state(&assembly_state)
+            .viewport_state(&viewport_state)
+            .rasterization_state(&raster_state)
+            .multisample_state(&multisample_state)
+            .color_blend_state(&blend_state)
+            .dynamic_state(&dynamic_state)
+            .render_pass(render_pass)
+            .subpass(0)
+            .layout(layout);
+        device
+            .create_graphics_pipelines(
+                vk::PipelineCache::null(),
+                std::slice::from_ref(&pipeline_info),
+                None,
+            )
+            .map_err(|(_, error)| error)
+            .map(|pipelines| pipelines[0])
     }
 }

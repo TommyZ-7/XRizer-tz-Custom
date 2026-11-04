@@ -290,8 +290,8 @@ impl GraphicsBackend for VulkanData {
                     );
                 });
                 return xr::Extent2Di {
-                    width: extent.width as _,
-                    height: extent.height as _,
+                    width: params.dst_width as _,
+                    height: params.dst_height as _,
                 };
             }
         }

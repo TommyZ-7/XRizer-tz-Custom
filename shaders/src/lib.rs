@@ -16,6 +16,7 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
         ("overlay.frag", "frag_overlay.spv"),
         ("upscaler.vert", "vert_upscaler.spv"),
         ("upscaler.frag", "frag_upscaler.spv"),
+        ("fast.frag", "frag_fast.spv"),
     ];
 
     let cache_path = PathBuf::from(out_dir).join("shader_cache.json");

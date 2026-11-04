@@ -579,7 +579,8 @@ impl Overlay {
                     .entry(key)
                     .unwrap()
                     .or_insert_with(&mut create_swapchain);
-                if !is_usable_swapchain(&data.info, data.initial_format, &tex_swapchain_info) {
+                if !is_usable_swapchain(&data.info, data.initial_format, &tex_swapchain_info, false)
+                {
                     *data = create_swapchain();
                 }
                 &mut data.swapchain

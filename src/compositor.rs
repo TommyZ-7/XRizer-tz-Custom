@@ -792,6 +792,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             texture: &vr::Texture_t,
             bounds: vr::VRTextureBounds_t,
             flags: vr::EVRSubmitFlags,
+            base_size: Option<(u32, u32)>,
         ) -> xr::Result<(), vr::EVRCompositorError>
         where
             for<'d> &'d openxr_data::GraphicalSession:
@@ -807,8 +808,22 @@ impl vr::IVRCompositor029_Interface for Compositor {
                 texture.eColorSpace,
                 bounds,
                 flags,
+                base_size,
             )
         }
+
+        #[macros::any_graphics(DynFrameController)]
+        fn supports_upscaler<G: GraphicsBackend + 'static>(ctrl: &FrameController<G>) -> bool {
+            ctrl.backend.supports_upscaler()
+        }
+
+        let upscaler_base = if crate::upscaler::snapshot().enabled
+            && ctrl.with_any_graphics::<supports_upscaler>(())
+        {
+            Some(self.openxr.base_recommended_view_size())
+        } else {
+            None
+        };
 
         if let Err(e) = ctrl.with_any_graphics_mut::<submit>((
             &session_lock,
@@ -816,6 +831,7 @@ impl vr::IVRCompositor029_Interface for Compositor {
             texture,
             bounds,
             submit_flags,
+            upscaler_base,
         )) {
             return e;
         }
@@ -1233,6 +1249,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         trace!("frame begin");
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn submit_impl(
         &mut self,
         session_data: &SessionData,
@@ -1241,6 +1258,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         submit_flags: vr::EVRSubmitFlags,
+        base_size: Option<(u32, u32)>,
     ) -> Result<(), vr::EVRCompositorError>
     where
         <G::Api as xr::Graphics>::Format: Eq,
@@ -1255,9 +1273,9 @@ impl<G: GraphicsBackend> FrameController<G> {
 
         self.eyes_submitted[eye as usize] = if self.should_render {
             // Make sure our image dimensions haven't changed.
-            let new_info = self
-                .backend
-                .swapchain_info_for_texture(texture, bounds, color_space);
+            let mut new_info =
+                self.backend
+                    .swapchain_info_for_texture(texture, bounds, color_space);
 
             is_valid_swapchain_info(&new_info)
                 .then(|| {
@@ -1269,13 +1287,6 @@ impl<G: GraphicsBackend> FrameController<G> {
                     let input_width = new_info.width;
                     let input_height = new_info.height;
                     let input_sample_count = new_info.sample_count;
-                    if !self.swapchain_data.as_ref().is_some_and(|data| {
-                        is_usable_swapchain(&data.info, data.initial_format, &new_info)
-                    }) {
-                        info!("recreating swapchain (for {eye:?})");
-                        self.recreate_swapchain(session_data, new_info);
-                    }
-
                     let upscaler_params = if let Some(params) = self.frame_upscaler_params {
                         Some(params)
                     } else {
@@ -1284,17 +1295,26 @@ impl<G: GraphicsBackend> FrameController<G> {
                             && self.backend.supports_upscaler()
                             && input_sample_count == 1
                         {
-                            // Task 3 PoC: parameters are input-sized; the
-                            // output size split arrives with the fast path.
-                            let mut input_sized = upscaler_config.clone();
-                            input_sized.output_scale = 1.0;
-                            input_sized.params_for_size(input_width, input_height, bounds)
+                            let base = base_size.unwrap_or((input_width, input_height));
+                            upscaler_config.params_for_size(base.0, base.1, bounds)
                         } else {
                             None
                         };
                         self.frame_upscaler_params = computed;
                         computed
                     };
+                    if let Some(params) = upscaler_params {
+                        new_info.width = params.dst_width;
+                        new_info.height = params.dst_height;
+                    }
+                    let exact_size = upscaler_params.is_some();
+
+                    if !self.swapchain_data.as_ref().is_some_and(|data| {
+                        is_usable_swapchain(&data.info, data.initial_format, &new_info, exact_size)
+                    }) {
+                        info!("recreating swapchain (for {eye:?})");
+                        self.recreate_swapchain(session_data, new_info);
+                    }
 
                     SubmittedEye {
                         extent: self.backend.copy_texture_to_swapchain(
@@ -1471,13 +1491,18 @@ pub fn is_usable_swapchain<G: xr::Graphics>(
     current: &xr::SwapchainCreateInfo<G>,
     creation_format: G::Format,
     new: &xr::SwapchainCreateInfo<G>,
+    exact_size: bool,
 ) -> bool
 where
     G::Format: Eq,
 {
+    let size_matches = if exact_size {
+        current.width == new.width && current.height == new.height
+    } else {
+        current.width >= new.width && current.height >= new.height
+    };
     creation_format == new.format
-        && current.width >= new.width
-        && current.height >= new.height
+        && size_matches
         && current.array_size == new.array_size
         && current.sample_count == new.sample_count
 }
@@ -1722,6 +1747,16 @@ mod tests {
             ctrl.backend.flushes.load(Ordering::Relaxed)
         }
 
+        fn swapchain_size(&self) -> (u32, u32) {
+            let data = self.comp.openxr.session_data.get();
+            let lock = data.comp_data.0.lock().unwrap();
+            let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
+                panic!("Frame controller was not set up or not faked!");
+            };
+            let info = &ctrl.swapchain_data.as_ref().unwrap().info;
+            (info.width, info.height)
+        }
+
         fn set_fake_supports_upscaler(&self, supports: bool) {
             let data = self.comp.openxr.session_data.get();
             let mut lock = data.comp_data.0.lock().unwrap();
@@ -1779,6 +1814,68 @@ mod tests {
         assert_eq!(params.dst_height, SWAPCHAIN_HEIGHT.with(Cell::get));
         assert_eq!(params.shader_kind(), 1);
 
+        crate::upscaler::reset_for_test();
+    }
+
+    #[test]
+    fn exact_swapchain_reuse_requires_same_size() {
+        fn info(width: u32, height: u32) -> xr::SwapchainCreateInfo<FakeApi> {
+            xr::SwapchainCreateInfo {
+                create_flags: xr::SwapchainCreateFlags::EMPTY,
+                usage_flags: xr::SwapchainUsageFlags::EMPTY,
+                format: 0,
+                sample_count: 1,
+                width,
+                height,
+                face_count: 1,
+                array_size: 2,
+                mip_count: 1,
+            }
+        }
+
+        let current = info(100, 100);
+        let same = info(100, 100);
+        let smaller = info(80, 80);
+        let larger = info(120, 120);
+        assert!(is_usable_swapchain(&current, 0, &same, false));
+        assert!(is_usable_swapchain(&current, 0, &smaller, false));
+        assert!(!is_usable_swapchain(&current, 0, &larger, false));
+
+        assert!(is_usable_swapchain(&current, 0, &same, true));
+        assert!(!is_usable_swapchain(&current, 0, &smaller, true));
+        assert!(!is_usable_swapchain(&current, 0, &larger, true));
+    }
+
+    #[test]
+    fn upscaler_output_size_uses_recommended_size_and_scale() {
+        let _guard = crate::upscaler::test_lock();
+        crate::upscaler::reset_for_test();
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        f.set_fake_supports_upscaler(true);
+        crate::upscaler::set_for_test(crate::upscaler::UpscalerConfig {
+            enabled: true,
+            output_scale: 0.8,
+            ..Default::default()
+        });
+
+        assert_eq!(f.wait_get_poses(), None);
+        f.set_should_render(true);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert_eq!(f.swapchain_size(), (8, 8));
+
+        // A dynamic input size change must not resize the output swapchain.
+        SWAPCHAIN_WIDTH.set(20);
+        SWAPCHAIN_HEIGHT.set(20);
+        assert_eq!(f.wait_get_poses(), None);
+        f.set_should_render(true);
+        assert_eq!(f.submit(vr::EVREye::Left), None);
+        assert_eq!(f.submit(vr::EVREye::Right), None);
+        assert_eq!(f.swapchain_size(), (8, 8));
+
+        SWAPCHAIN_WIDTH.set(10);
+        SWAPCHAIN_HEIGHT.set(10);
         crate::upscaler::reset_for_test();
     }
 

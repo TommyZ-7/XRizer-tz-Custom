@@ -306,7 +306,7 @@ pub unsafe extern "system" fn get_instance_proc_addr(
                     (EnumerateViewConfigurations),
                     (EnumerateEnvironmentBlendModes),
                     (GetViewConfigurationProperties),
-                    (EnumerateViewConfigurationViews),
+                    EnumerateViewConfigurationViews,
                     BeginFrame,
                     EndFrame,
                     WaitFrame,
@@ -1733,6 +1733,38 @@ extern "system" fn end_frame(session: xr::Session, _info: *const xr::FrameEndInf
     }
     if session.state.load() == xr::SessionState::READY {
         session.synchronized();
+    }
+    xr::Result::SUCCESS
+}
+
+extern "system" fn enumerate_view_configuration_views(
+    _: xr::Instance,
+    _: xr::SystemId,
+    _: xr::ViewConfigurationType,
+    capacity_input: u32,
+    count_output: *mut u32,
+    views: *mut xr::ViewConfigurationView,
+) -> xr::Result {
+    if !count_output.is_null() {
+        unsafe { *count_output = 2 };
+    }
+    if capacity_input >= 2 && !views.is_null() {
+        for index in 0..2 {
+            unsafe {
+                views.add(index).write(xr::ViewConfigurationView {
+                    ty: xr::ViewConfigurationView::TYPE,
+                    next: std::ptr::null_mut(),
+                    recommended_image_rect_width: 10,
+                    max_image_rect_width: 10,
+                    recommended_image_rect_height: 10,
+                    max_image_rect_height: 10,
+                    recommended_swapchain_sample_count: 1,
+                    max_swapchain_sample_count: 1,
+                });
+            }
+        }
+    } else if capacity_input > 0 {
+        return xr::Result::ERROR_SIZE_INSUFFICIENT;
     }
     xr::Result::SUCCESS
 }
