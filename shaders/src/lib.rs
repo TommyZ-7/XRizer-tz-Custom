@@ -26,6 +26,8 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
         ("residual_cnn.comp", "comp_residual_cnn.spv"),
         ("srpo.comp", "comp_srpo.spv"),
         ("dp4a_probe.comp", "comp_dp4a_probe.spv"),
+        ("capture.vert", "vert_capture.spv"),
+        ("capture.frag", "frag_capture.spv"),
     ];
 
     let cache_path = PathBuf::from(out_dir).join("shader_cache.json");

@@ -243,6 +243,20 @@ Diagnostics are counters only (no image contents): frames, upscaled frames, fast
 
 Budget and limits: aim for <=1.0 ms stereo total and <=0.5 ms typical. ML is dispatched only inside the radial weight bounding box; feature/model/pipeline failures fall back to FSR/SGSR. GPU timestamp budget enforcement is not active yet; it is part of the on-target benchmark phase. The upscaler runs before runtime lens distortion and only on the game projection layer, so overlays are never sharpened. It is Vulkan-only for now; OpenGL keeps the old copy path. FSR 1 expects anti-aliased, post-tonemap input. There is no engine history, motion vector, or depth input, so temporal shimmer must be controlled by residual clamping and evaluated on video. MSAA submissions take the existing resolve path. Dynamic render scale does not resize the output swapchain.
 
+### Training captures (opt-in)
+
+For Task 14 training data, XRizer can save the submitted eye textures (before upscaling and before runtime distortion) as lossless 8-bit PNGs. Capture is disabled unless explicitly enabled, so the normal path performs no readback or extra copy:
+
+```sh
+XRIZER_CAPTURE=1 \
+XRIZER_CAPTURE_DIR="$HOME/xrizer-captures/VRChat/scene-a" \
+XRIZER_CAPTURE_INTERVAL_MS=500 \
+XRIZER_CAPTURE_MAX_PAIRS=300 \
+  %command%
+```
+
+Files are `frame_000001_left.png` and `frame_000001_right.png` plus `metadata.json` (resolution, format, colour space, bounds, `render_scale`, preset, per-eye entries). Capture stops automatically at `XRIZER_CAPTURE_MAX_PAIRS` (default 300 pairs); there is no VR hotkey. `XRIZER_CAPTURE=0` is the off-switch. See `tools/upscaler_dataset.md` for the full layout and metadata. PNG encoding is off the submit path; the submit thread only records a separate command buffer and polls a fence. MSAA is skipped and HDR/10-bit sources are clipped to 8-bit.
+
 The version xrizer reports comes from `git describe`, via the default `git-version` feature. Builds that don't have a git checkout - distribution packages and other builds from a source tarball - can disable that feature with `--no-default-features` (re-enabling the other default features they want, e.g. `--features monado`) and set `XRIZER_VERSION` at build time instead. `XRIZER_VERSION` takes precedence over `git describe` whenever it is set.
 
 # Contributing

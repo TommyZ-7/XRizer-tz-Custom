@@ -1700,7 +1700,7 @@ mod tests {
             xr::Extent2Di::default()
         }
 
-        fn flush_copies(&self, _image_index: usize) {
+        fn flush_copies(&mut self, _image_index: usize) {
             self.flushes.fetch_add(1, Ordering::Relaxed);
         }
     }

@@ -12,8 +12,10 @@ captures/
     <game>/
       <scene>/
         metadata.json
-        frame_000001.png
-        frame_000002.png
+        frame_000001_left.png
+        frame_000001_right.png
+        frame_000002_left.png
+        frame_000002_right.png
         ...
   native_lr/                  # optional, test-only native low-res pairs
     <game>/
@@ -45,6 +47,69 @@ captures/
 - `color_space`: `srgb`, `linear`, or `hdr`. Train/evaluate each separately.
 - `render_scale`: the linear render scale used for the runtime frame.
 - `eye`: `left`, `right`, or `both`. Keep both eyes for stereo checks.
+
+## XRizer capture mode
+
+XRizer can write the submitted eye textures directly. This is opt-in and
+disabled by default; without the environment variables no readback, copy, or
+extra GPU work is created.
+
+```sh
+XRIZER_CAPTURE=1 \
+XRIZER_CAPTURE_DIR="$HOME/xrizer-captures/VRChat/scene-a" \
+XRIZER_CAPTURE_INTERVAL_MS=500 \
+XRIZER_CAPTURE_MAX_PAIRS=300 \
+XRIZER_CAPTURE_SCENE="scene-a" \
+  %command%
+```
+
+- `XRIZER_CAPTURE=1` (or setting `XRIZER_CAPTURE_DIR`) enables capture.
+  `XRIZER_CAPTURE=0` disables it even if a directory is set.
+- `XRIZER_CAPTURE_DIR` is the output directory. It is created if missing and
+  may be a `captures/highres/<game>/<scene>` directory.
+- `XRIZER_CAPTURE_INTERVAL_MS` defaults to 500 ms, clamped to 100–60000.
+- `XRIZER_CAPTURE_MAX_PAIRS` defaults to 300 pairs (600 PNGs), clamped to
+  1–100000. Capture stops automatically; there is no VR hotkey.
+- `XRIZER_CAPTURE_SCENE` is copied into the metadata (default `unspecified`).
+
+Files are `frame_000001_left.png` and `frame_000001_right.png`, plus a
+`metadata.json`. The writer uses lossless 8-bit RGBA PNG. The capture pass reads
+the game's submitted texture before the upscaler and before runtime distortion.
+If the source is HDR/10-bit it is clipped to 8-bit; MSAA submissions are skipped
+because the capture shader samples a single-sample image. PNG encoding runs on a
+background thread; the submit path records a separate command buffer and polls a
+fence, it does not wait for disk I/O.
+
+`metadata.json` contains:
+
+```json
+{
+  "capture_version": 1,
+  "game": "VRChat",
+  "scene": "scene-a",
+  "aa_mode": "unknown",
+  "color_space": "unknown",
+  "eye": "both",
+  "session_started_unix_ms": 0,
+  "render_scale": 0.7,
+  "output_scale": 1.0,
+  "preset": "fsr",
+  "frames": [
+    {
+      "index": 1,
+      "timestamp_unix_ms": 0,
+      "frame_time_ms": 500.0,
+      "render_scale": 0.7,
+      "left": {"file": "frame_000001_left.png", "width": 2016, "height": 2240, "format": "R8G8B8A8_SRGB", "color_space": "srgb", "array_layer": 0, "bounds": [0.0, 0.0, 1.0, 1.0]},
+      "right": {"file": "frame_000001_right.png", "width": 2016, "height": 2240, "format": "R8G8B8A8_SRGB", "color_space": "srgb", "array_layer": 0, "bounds": [0.0, 0.0, 1.0, 1.0]}
+    }
+  ]
+}
+```
+
+The per-frame `index`, eye, dimensions, bounds, and `render_scale` are the
+native-LR correlation keys. Keep the original `metadata.json` when moving a
+capture session into the dataset tree.
 
 ## LR generation
 

@@ -148,9 +148,9 @@ def validate_metadata(metadata: dict) -> None:
     missing = [key for key in required if key not in metadata]
     if missing:
         raise ValueError(f"metadata is missing {missing}")
-    if metadata["aa_mode"] not in {"none", "fxaa", "taa", "msaa"}:
+    if metadata["aa_mode"] not in {"none", "fxaa", "taa", "msaa", "unknown"}:
         raise ValueError("unknown aa_mode")
-    if metadata["color_space"] not in {"srgb", "linear", "hdr"}:
+    if metadata["color_space"] not in {"srgb", "linear", "hdr", "unknown"}:
         raise ValueError("unknown color_space")
     if not (0.1 <= float(metadata["render_scale"]) <= 4.0):
         raise ValueError("render_scale out of range")
