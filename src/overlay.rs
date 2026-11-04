@@ -915,6 +915,15 @@ impl vr::IVROverlay028_Interface for OverlayMan {
     fn ClearOverlayTexture(&self, handle: vr::VROverlayHandle_t) -> vr::EVROverlayError {
         get_overlay!(self, handle, mut overlay);
         overlay.rect = None;
+
+        #[macros::any_graphics(SupportedBackend)]
+        fn clear_overlay_cache<G: GraphicsBackend>(backend: &mut G) {
+            backend.clear_overlay_cache();
+        }
+        if let Some(backend) = overlay.compositor.as_mut() {
+            backend.with_any_graphics_mut::<clear_overlay_cache>(());
+        }
+
         vr::EVROverlayError::None
     }
     fn ClearOverlayCursorPositionOverride(&self, _: vr::VROverlayHandle_t) -> vr::EVROverlayError {

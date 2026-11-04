@@ -193,6 +193,23 @@ impl<C: openxr_data::Compositor> Input<C> {
         action: vr::VRActionHandle_t,
         restrict_to_device: vr::VRInputValueHandle_t,
     ) -> Option<(xr::ActionState<bool>, vr::VRInputValueHandle_t)> {
+        // Most actions have no custom bindings. Avoid querying the interaction
+        // profile for those; per_profile_bindings is built exclusively from
+        // add_custom_binding, so this set is authoritative. Keep the session
+        // guard scoped so the NULL-subaction recursion below does not acquire
+        // the read lock recursively.
+        let has_custom_bindings = {
+            let session = self.openxr.session_data.get();
+            let LoadedActions::Manifest(loaded_actions) = session.input_data.actions.get()? else {
+                return None;
+            };
+            let key = ActionKey::from(KeyData::from_ffi(action));
+            loaded_actions.actions_with_custom_bindings.contains(&key)
+        };
+        if !has_custom_bindings {
+            return None;
+        }
+
         let subaction = self.subaction_path_from_handle(restrict_to_device)?;
         if subaction == xr::Path::NULL {
             return self.state_from_bindings_left_right(action);

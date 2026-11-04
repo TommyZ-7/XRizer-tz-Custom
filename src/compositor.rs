@@ -1038,6 +1038,9 @@ struct SwapchainData<G: xr::Graphics> {
 }
 
 struct FrameController<G: GraphicsBackend> {
+    /// Keep the backend first so its swapchain-backed resources are released
+    /// before `swapchain_data` destroys the OpenXR swapchain images.
+    backend: G,
     stream: xr::FrameStream<G::Api>,
     waiter: xr::FrameWaiter,
     swapchain_data: Option<SwapchainData<G::Api>>,
@@ -1048,7 +1051,6 @@ struct FrameController<G: GraphicsBackend> {
     app_fade_grid: bool,
     eyes_submitted: [Option<SubmittedEye>; 2],
     submitting_null: bool,
-    backend: G,
 }
 supported_backends_enum!(enum DynFrameController: FrameController);
 
@@ -1127,6 +1129,7 @@ impl<G: GraphicsBackend> FrameController<G> {
         };
 
         Self {
+            backend,
             stream,
             waiter,
             swapchain_data,
@@ -1137,7 +1140,6 @@ impl<G: GraphicsBackend> FrameController<G> {
             app_fade_grid: false,
             eyes_submitted: Default::default(),
             submitting_null: false,
-            backend,
         }
     }
 

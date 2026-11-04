@@ -40,22 +40,20 @@ impl<C: openxr_data::Compositor> Input<C> {
             return;
         };
 
-        let Some(joints) = controller.get_hand_skeleton(&self.openxr, &raw) else {
+        let Some(joint_locations) = controller.get_hand_skeleton(&self.openxr, &raw) else {
             self.get_estimated_bones(session_data, space, hand, transforms);
             return;
         };
 
-        let mut joints: Box<[_]> = joints
-            .into_iter()
-            .map(|joint_location| {
-                let position = joint_location.pose.position;
-                let orientation = joint_location.pose.orientation;
-                Affine3A::from_rotation_translation(
-                    Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w),
-                    Vec3::from_array([position.x, position.y, position.z]),
-                )
-            })
-            .collect();
+        let mut joints: [Affine3A; xr::HAND_JOINT_COUNT] = std::array::from_fn(|i| {
+            let joint_location = joint_locations[i];
+            let position = joint_location.pose.position;
+            let orientation = joint_location.pose.orientation;
+            Affine3A::from_rotation_translation(
+                Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w),
+                Vec3::from_array([position.x, position.y, position.z]),
+            )
+        });
 
         let xr_joint_to_vr_bone = |joint: &Affine3A, bone: &mut vr::VRBoneTransform_t| {
             let (_, mut rot, mut pos) = joint.to_scale_rotation_translation();
@@ -104,7 +102,7 @@ impl<C: openxr_data::Compositor> Input<C> {
         // joint in that finger is a parent->child relationship.
         // https://github.com/ValveSoftware/openvr/wiki/Hand-Skeleton#bone-structure
         let parent_id = RefCell::new(xr::HandJoint::WRIST);
-        let mut parented_joints = joints.clone();
+        let mut parented_joints = joints;
         let mut localize = |joint: xr::HandJoint| {
             let mut parent_id = parent_id.borrow_mut();
             parented_joints[joint] = joints[*parent_id].inverse() * parented_joints[joint];
@@ -148,10 +146,13 @@ impl<C: openxr_data::Compositor> Input<C> {
         // Convert back to model space if needed
         // it is unnecessary to convert back and forth, but it works and it's easy
         if space == vr::EVRSkeletalTransformSpace::Model {
-            let bone_data: Vec<(Vec3, Quat)> = parent_to_model_space_bone_data(
-                transforms.iter().map(|t| bone_transform_to_glam(*t)),
-            )
-            .collect();
+            // Snapshot on the stack so the iterator and output slice don't
+            // borrow `transforms` at the same time. Extra caller-provided
+            // entries beyond the skeleton are left untouched.
+            let source: [vr::VRBoneTransform_t; HandSkeletonBone::Count as usize] =
+                std::array::from_fn(|i| transforms[i]);
+            let bone_data =
+                parent_to_model_space_bone_data(source.iter().map(|t| bone_transform_to_glam(*t)));
 
             for (transform, (pos, rot)) in transforms.iter_mut().zip(bone_data) {
                 transform.position = pos.into();
@@ -186,22 +187,20 @@ impl<C: openxr_data::Compositor> Input<C> {
             return;
         };
 
-        let Some(joints) = controller.get_hand_skeleton(&self.openxr, &raw) else {
+        let Some(joint_locations) = controller.get_hand_skeleton(&self.openxr, &raw) else {
             self.get_estimated_bone_summary(session_data, summary_type, summary_data, hand);
             return;
         };
 
-        let joints: Box<[_]> = joints
-            .into_iter()
-            .map(|joint_location| {
-                let position = joint_location.pose.position;
-                let orientation = joint_location.pose.orientation;
-                (
-                    Vec3::from_array([position.x, position.y, position.z]),
-                    Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w),
-                )
-            })
-            .collect();
+        let joints: [(Vec3, Quat); xr::HAND_JOINT_COUNT] = std::array::from_fn(|i| {
+            let joint_location = joint_locations[i];
+            let position = joint_location.pose.position;
+            let orientation = joint_location.pose.orientation;
+            (
+                Vec3::from_array([position.x, position.y, position.z]),
+                Quat::from_xyzw(orientation.x, orientation.y, orientation.z, orientation.w),
+            )
+        });
 
         // FIXME: calculate splay
         summary_data.flFingerSplay.fill(0.2);

@@ -9,7 +9,7 @@ use openvr as vr;
 use openxr as xr;
 use std::mem::ManuallyDrop;
 use std::sync::{
-    RwLock,
+    Mutex, RwLock,
     atomic::{AtomicI64, Ordering},
 };
 use std::time::Duration;
@@ -43,6 +43,9 @@ pub struct OpenXrData<C: Compositor> {
     pub display_time: AtomicXrTime,
     pub display_period_nanos: AtomicI64,
     pub enabled_extensions: xr::ExtensionSet,
+    /// Recommended per-eye render target size before supersampling. Cleared on
+    /// session restart because the runtime may report a different size.
+    pub(crate) recommended_view_size: Mutex<Option<(u32, u32)>>,
 
     /// should only be externally accessed for testing
     pub(crate) input: Injected<crate::input::Input<C>>,
@@ -194,6 +197,7 @@ impl<C: Compositor> OpenXrData<C> {
             display_time: AtomicXrTime(display_time.into()), // This will get replaced on the first WaitGetPoses
             display_period_nanos: 11111111.into(), // This will get replaced on the first WaitGetPoses
             enabled_extensions: exts,
+            recommended_view_size: Mutex::new(None),
             input: injector.inject(),
             compositor: injector.inject(),
         })
@@ -231,6 +235,7 @@ impl<C: Compositor> OpenXrData<C> {
     }
 
     pub fn restart_session(&self) {
+        *self.recommended_view_size.lock().unwrap() = None;
         let mut session_guard = self.session_data.0.write().unwrap();
         self.end_session(&mut session_guard);
 

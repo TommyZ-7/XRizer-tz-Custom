@@ -9,7 +9,7 @@ use log::warn;
 use openvr as vr;
 use openxr as xr;
 use std::ffi::{CStr, CString, c_char, c_void};
-use std::sync::{Arc, LazyLock, Once};
+use std::sync::{Arc, LazyLock, Mutex, Once};
 
 static GLX: LazyLock<Library> = LazyLock::new(|| Library::new(c"libGLX.so.0"));
 
@@ -19,6 +19,17 @@ pub struct GlData {
     format: u32,
     read_fbo: u32,
     draw_fbo: u32,
+    /// Information from the most recent `swapchain_info_for_texture` call.
+    /// `copy_texture_to_swapchain` is always called immediately after it for
+    /// the same texture, so the GL queries can be shared instead of repeated.
+    texture_info: Mutex<
+        Option<(
+            gl::types::GLuint,
+            gl::types::GLint,
+            gl::types::GLint,
+            gl::types::GLint,
+        )>,
+    >,
 }
 
 #[derive(Deref)]
@@ -135,7 +146,16 @@ impl GlData {
             format: 0,
             read_fbo: fbos[0],
             draw_fbo: fbos[1],
+            texture_info: Mutex::new(None),
         })
+    }
+
+    fn take_texture_info(
+        &self,
+        texture: gl::types::GLuint,
+    ) -> Option<(gl::types::GLint, gl::types::GLint, gl::types::GLint)> {
+        let (cached_texture, fmt, width, height) = self.texture_info.lock().unwrap().take()?;
+        (cached_texture == texture).then_some((fmt, width, height))
     }
 }
 
@@ -177,6 +197,7 @@ impl GraphicsBackend for GlData {
         color_space: vr::EColorSpace,
     ) -> xr::SwapchainCreateInfo<Self::Api> {
         let (fmt, width, height) = texture_format_and_size(texture);
+        *self.texture_info.lock().unwrap() = Some((texture, fmt, width, height));
         let xr::Rect2Di { extent, .. } = rect_from_size_and_bounds(width, height, bounds);
 
         let fmt = match color_space {
@@ -212,7 +233,9 @@ impl GraphicsBackend for GlData {
     ) -> xr::Extent2Di {
         let swapchain_texture = self.images[image_index];
 
-        let (fmt, width, height) = texture_format_and_size(texture);
+        let (fmt, width, height) = self
+            .take_texture_info(texture)
+            .unwrap_or_else(|| texture_format_and_size(texture));
         let xr::Rect2Di { extent, offset } = rect_from_size_and_bounds(width, height, bounds);
 
         if self.format == fmt as u32 {

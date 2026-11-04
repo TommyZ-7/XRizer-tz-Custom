@@ -53,6 +53,10 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
     ) -> xr::Extent2Di;
+
+    /// Release cached overlay resources. Called when the application clears an
+    /// overlay texture, so the application is free to destroy it afterwards.
+    fn clear_overlay_cache(&mut self) {}
 }
 
 #[derive(macros::Backends, TryInto, From)]

@@ -13,6 +13,46 @@ struct RealSessionData {
     pool: vk::CommandPool,
     bufs: Vec<vk::CommandBuffer>,
     overlay_pipeline: Option<PipelineData>,
+    /// One cache entry per swapchain image. The overlay texture is expected to
+    /// stay valid while it is set (OpenVR releases it via ClearOverlayTexture),
+    /// so the image view and framebuffer can be reused across updates.
+    overlay_cache: Vec<Option<OverlayCache>>,
+}
+
+struct OverlayCache {
+    texture: vk::Image,
+    format: vk::Format,
+    width: u32,
+    height: u32,
+    game_view: vk::ImageView,
+    framebuffer: vk::Framebuffer,
+}
+
+impl OverlayCache {
+    unsafe fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            device.destroy_framebuffer(self.framebuffer, None);
+            device.destroy_image_view(self.game_view, None);
+        }
+    }
+}
+
+impl RealSessionData {
+    unsafe fn destroy(&self, device: &ash::Device) {
+        for cache in self.overlay_cache.iter().flatten() {
+            unsafe {
+                cache.destroy(device);
+            }
+        }
+        if let Some(pipeline) = &self.overlay_pipeline {
+            unsafe {
+                pipeline.destroy(device);
+            }
+        }
+        unsafe {
+            device.destroy_command_pool(self.pool, None);
+        }
+    }
 }
 
 pub struct VulkanData {
@@ -36,16 +76,9 @@ impl Drop for VulkanData {
                 self.device.destroy_device(None);
                 self.instance.destroy_instance(None);
             },
-            // Real session - the handles come from the app, only destroy the command pool we created
+            // Real session - the handles come from the app, only destroy resources we created
             Some(data) => unsafe {
-                self.device.destroy_command_pool(data.pool, None);
-                if let Some(data) = &data.overlay_pipeline {
-                    self.device.destroy_pipeline(data.pipeline, None);
-                    self.device.destroy_pipeline_layout(data.layout, None);
-                    self.device.destroy_render_pass(data.renderpass, None);
-                    self.device.destroy_descriptor_pool(data.pool, None);
-                    self.device.destroy_sampler(data.sampler, None);
-                }
+                data.destroy(&self.device);
             },
         }
     }
@@ -97,6 +130,7 @@ impl GraphicsBackend for VulkanData {
     }
     fn store_swapchain_images(&mut self, images: Vec<u64>, format: u32) {
         let images: Vec<vk::Image> = images.into_iter().map(vk::Image::from_raw).collect();
+        let image_count = images.len();
         let pool = unsafe {
             self.device
                 .create_command_pool(
@@ -114,20 +148,27 @@ impl GraphicsBackend for VulkanData {
                         .command_pool(pool)
                         .level(vk::CommandBufferLevel::PRIMARY)
                         // We have to copy 2 eyes per swapchain image
-                        .command_buffer_count(images.len() as u32 * 2),
+                        .command_buffer_count(image_count as u32 * 2),
                 )
                 .unwrap()
         };
 
-        if let Some(data) = self.real_data.replace(RealSessionData {
+        let new_data = RealSessionData {
             images,
             format: vk::Format::from_raw(format as _),
             pool,
             bufs,
-            overlay_pipeline: Default::default(),
-        }) {
+            overlay_pipeline: None,
+            overlay_cache: (0..image_count).map(|_| None).collect(),
+        };
+
+        if let Some(old_data) = self.real_data.replace(new_data) {
             unsafe {
-                self.device.destroy_command_pool(data.pool, None);
+                // The old command buffers may still be in flight; do not
+                // destroy their pool or overlay resources until the GPU is
+                // done with them.
+                self.device.queue_wait_idle(self.queue).unwrap();
+                old_data.destroy(&self.device);
             }
         }
     }
@@ -327,8 +368,6 @@ impl GraphicsBackend for VulkanData {
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
     ) -> xr::Extent2Di {
-        let mut data = self.real_data.as_ref().unwrap();
-        let buf = data.bufs[image_index];
         let texture = unsafe { texture.as_ref() }.unwrap();
         let (extent, offset) = texture_extent_from_bounds(texture, bounds);
         let rect = vk::Rect2D {
@@ -341,71 +380,132 @@ impl GraphicsBackend for VulkanData {
                 height: extent.height,
             },
         };
-        let pipeline_data = match &data.overlay_pipeline {
-            Some(d) => {
-                assert_eq!(
-                    d.image_format, data.format,
-                    "Overlay image format unexpectedly changed"
-                );
-                d
+        let texture_image = vk::Image::from_raw(texture.m_nImage);
+        let source_format = vk::Format::from_raw(texture.m_nFormat as _);
+
+        let data = self.real_data.as_mut().unwrap();
+        let buf = data.bufs[image_index];
+
+        // The render pass embeds both formats and the sample count, so rebuild
+        // it if any of them changes for this overlay.
+        let needs_new_pipeline = data.overlay_pipeline.as_ref().is_none_or(|pipeline| {
+            pipeline.source_format != source_format
+                || pipeline.image_format != data.format
+                || pipeline.sample_count != texture.m_nSampleCount
+        });
+        if needs_new_pipeline {
+            let has_old_resources =
+                data.overlay_pipeline.is_some() || data.overlay_cache.iter().any(Option::is_some);
+            if has_old_resources {
+                unsafe {
+                    self.device.queue_wait_idle(self.queue).unwrap();
+                }
             }
-            None => {
-                self.real_data.as_mut().unwrap().overlay_pipeline = Some(PipelineData::new(
-                    &self.device,
-                    vk::Format::from_raw(texture.m_nFormat as _),
-                    data.format,
-                    texture.m_nSampleCount,
-                    &data.images,
-                ));
-                data = self.real_data.as_ref().unwrap();
-                data.overlay_pipeline.as_ref().unwrap()
+            for cache in data.overlay_cache.iter_mut().filter_map(Option::take) {
+                unsafe {
+                    cache.destroy(&self.device);
+                }
             }
+            if let Some(old) = data.overlay_pipeline.take() {
+                unsafe {
+                    old.destroy(&self.device);
+                }
+            }
+            data.overlay_pipeline = Some(PipelineData::new(
+                &self.device,
+                source_format,
+                data.format,
+                texture.m_nSampleCount,
+                &data.images,
+            ));
+        }
+
+        let (swapchain_view, renderpass, set, sampler, layout, pipeline) = {
+            let pipeline = data.overlay_pipeline.as_ref().unwrap();
+            (
+                pipeline.image_views[image_index],
+                pipeline.renderpass,
+                pipeline.set,
+                pipeline.sampler,
+                pipeline.layout,
+                pipeline.pipeline,
+            )
         };
 
-        let swapchain_view = pipeline_data.image_views[image_index];
-        // shortcut: per-overlay game_view + framebuffer create/destroy; cache only if overlay-bound.
-        let game_view = unsafe {
-            self.device
-                .create_image_view(
-                    &vk::ImageViewCreateInfo::default()
-                        .image(vk::Image::from_raw(texture.m_nImage))
-                        .format(vk::Format::from_raw(texture.m_nFormat as _))
-                        .view_type(vk::ImageViewType::TYPE_2D)
-                        .components(vk::ComponentMapping::default())
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        }),
-                    None,
-                )
-                .unwrap()
-        };
-        let fb = unsafe {
-            self.device
-                .create_framebuffer(
-                    &vk::FramebufferCreateInfo::default()
-                        .render_pass(pipeline_data.renderpass)
-                        .attachments(&[game_view, swapchain_view])
-                        .width(texture.m_nWidth)
-                        .height(texture.m_nHeight)
-                        .layers(1),
-                    None,
-                )
-                .unwrap()
+        let cache_matches = data.overlay_cache[image_index]
+            .as_ref()
+            .is_some_and(|cache| {
+                cache.texture == texture_image
+                    && cache.format == source_format
+                    && cache.width == texture.m_nWidth
+                    && cache.height == texture.m_nHeight
+            });
+
+        if !cache_matches {
+            if let Some(old) = data.overlay_cache[image_index].take() {
+                unsafe {
+                    self.device.queue_wait_idle(self.queue).unwrap();
+                    old.destroy(&self.device);
+                }
+            }
+
+            let game_view = unsafe {
+                self.device
+                    .create_image_view(
+                        &vk::ImageViewCreateInfo::default()
+                            .image(texture_image)
+                            .format(source_format)
+                            .view_type(vk::ImageViewType::TYPE_2D)
+                            .components(vk::ComponentMapping::default())
+                            .subresource_range(vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            }),
+                        None,
+                    )
+                    .unwrap()
+            };
+            let framebuffer = unsafe {
+                self.device
+                    .create_framebuffer(
+                        &vk::FramebufferCreateInfo::default()
+                            .render_pass(renderpass)
+                            .attachments(&[game_view, swapchain_view])
+                            .width(texture.m_nWidth)
+                            .height(texture.m_nHeight)
+                            .layers(1),
+                        None,
+                    )
+                    .unwrap()
+            };
+
+            data.overlay_cache[image_index] = Some(OverlayCache {
+                texture: texture_image,
+                format: source_format,
+                width: texture.m_nWidth,
+                height: texture.m_nHeight,
+                game_view,
+                framebuffer,
+            });
+        }
+
+        let (game_view, framebuffer) = {
+            let cache = data.overlay_cache[image_index].as_ref().unwrap();
+            (cache.game_view, cache.framebuffer)
         };
 
         unsafe {
             self.device.update_descriptor_sets(
                 &[vk::WriteDescriptorSet::default()
-                    .dst_set(pipeline_data.set)
+                    .dst_set(set)
                     .dst_binding(0)
                     .dst_array_element(0)
                     .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                     .image_info(&[vk::DescriptorImageInfo {
-                        sampler: pipeline_data.sampler,
+                        sampler,
                         image_view: game_view,
                         image_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                     }])],
@@ -414,11 +514,8 @@ impl GraphicsBackend for VulkanData {
         }
 
         self.record_commands(buf, || unsafe {
-            self.device.cmd_bind_pipeline(
-                buf,
-                vk::PipelineBindPoint::GRAPHICS,
-                pipeline_data.pipeline,
-            );
+            self.device
+                .cmd_bind_pipeline(buf, vk::PipelineBindPoint::GRAPHICS, pipeline);
             self.device.cmd_set_viewport(
                 buf,
                 0,
@@ -435,15 +532,15 @@ impl GraphicsBackend for VulkanData {
             self.device.cmd_bind_descriptor_sets(
                 buf,
                 vk::PipelineBindPoint::GRAPHICS,
-                pipeline_data.layout,
+                layout,
                 0,
-                &[pipeline_data.set],
+                &[set],
                 &[],
             );
             let pc = [bounds.uMin, bounds.uMax, bounds.vMin, bounds.vMax];
             self.device.cmd_push_constants(
                 buf,
-                pipeline_data.layout,
+                layout,
                 vk::ShaderStageFlags::VERTEX,
                 0,
                 pc.align_to().1,
@@ -451,8 +548,8 @@ impl GraphicsBackend for VulkanData {
             self.device.cmd_begin_render_pass(
                 buf,
                 &vk::RenderPassBeginInfo::default()
-                    .render_pass(pipeline_data.renderpass)
-                    .framebuffer(fb)
+                    .render_pass(renderpass)
+                    .framebuffer(framebuffer)
                     .render_area(rect),
                 vk::SubpassContents::INLINE,
             );
@@ -461,14 +558,26 @@ impl GraphicsBackend for VulkanData {
             self.device.cmd_end_render_pass(buf);
         });
 
-        unsafe {
-            self.device.destroy_framebuffer(fb, None);
-            self.device.destroy_image_view(game_view, None);
-        }
-
         xr::Extent2Di {
             width: extent.width as _,
             height: extent.height as _,
+        }
+    }
+
+    fn clear_overlay_cache(&mut self) {
+        let Some(data) = self.real_data.as_mut() else {
+            return;
+        };
+        if data.overlay_cache.iter().all(Option::is_none) {
+            return;
+        }
+        unsafe {
+            self.device.queue_wait_idle(self.queue).unwrap();
+        }
+        for cache in data.overlay_cache.iter_mut().filter_map(Option::take) {
+            unsafe {
+                cache.destroy(&self.device);
+            }
         }
     }
 }
@@ -621,13 +730,28 @@ struct PipelineData {
     layout: vk::PipelineLayout,
     renderpass: vk::RenderPass,
     image_views: Vec<vk::ImageView>,
+    source_format: vk::Format,
     image_format: vk::Format,
+    sample_count: u32,
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
     sampler: vk::Sampler,
 }
 
 impl PipelineData {
+    unsafe fn destroy(&self, device: &ash::Device) {
+        unsafe {
+            for &view in &self.image_views {
+                device.destroy_image_view(view, None);
+            }
+            device.destroy_sampler(self.sampler, None);
+            device.destroy_descriptor_pool(self.pool, None);
+            device.destroy_pipeline(self.pipeline, None);
+            device.destroy_pipeline_layout(self.layout, None);
+            device.destroy_render_pass(self.renderpass, None);
+        }
+    }
+
     fn new(
         device: &ash::Device,
         source_format: vk::Format,
@@ -867,7 +991,9 @@ impl PipelineData {
             layout: pipeline_layout,
             renderpass,
             image_views,
+            source_format,
             image_format: target_format,
+            sample_count,
             pool,
             set,
             sampler,
