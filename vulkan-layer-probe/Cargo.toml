@@ -12,3 +12,8 @@ log = { workspace = true }
 
 [lints]
 workspace = true
+
+[features]
+# Accepted so workspace-level `--features static-openxr` builds work;
+# this crate does not use OpenXR directly.
+static-openxr = []
