@@ -10,7 +10,7 @@ use log::{debug, error, trace, warn};
 use openvr as vr;
 use openxr as xr;
 use std::ffi::{CStr, CString};
-use std::sync::{Arc, Mutex, atomic::Ordering};
+use std::sync::{Arc, Mutex};
 
 #[derive(Copy, Clone)]
 pub struct ViewData {

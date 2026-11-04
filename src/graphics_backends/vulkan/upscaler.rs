@@ -2,7 +2,7 @@
 //! fast/SGSR/FSR/ML variants behind the same interface.
 
 use crate::upscaler::model::{Model, ModelKind};
-use crate::upscaler::{UpscalerParams, UpscalerPreset};
+use crate::upscaler::{FLAG_ML_ACTIVE, FLAG_OUTPUT_UNORM, UpscalerParams, UpscalerPreset};
 use ash::vk;
 use ash::vk::Handle;
 use log::warn;
@@ -22,6 +22,8 @@ struct PushConstants {
     con1: [u32; 4],
     con2: [u32; 4],
     con3: [u32; 4],
+    ml_origin: [u32; 2],
+    ml_size: [u32; 2],
 }
 
 pub struct UpscalerPipeline {
@@ -31,12 +33,16 @@ pub struct UpscalerPipeline {
     rcas_pipeline: vk::Pipeline,
     sgsr_pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
+    rcas_layout: vk::PipelineLayout,
     render_pass: vk::RenderPass,
     easu_render_pass: vk::RenderPass,
     set_layout: vk::DescriptorSetLayout,
+    rcas_set_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     source_sets: [vk::DescriptorSet; 2],
     intermediate_sets: [vk::DescriptorSet; 2],
+    rcas_fsr_sets: [vk::DescriptorSet; 2],
+    output_unorm: bool,
     intermediate_image: vk::Image,
     intermediate_memory: vk::DeviceMemory,
     intermediate_views: [vk::ImageView; 2],
@@ -88,8 +94,9 @@ impl UpscalerPipeline {
                 None,
             )?;
 
+            let intermediate_format = vk::Format::R8G8B8A8_SRGB;
             let easu_attachment = vk::AttachmentDescription {
-                format: target_format,
+                format: intermediate_format,
                 samples: vk::SampleCountFlags::TYPE_1,
                 load_op: vk::AttachmentLoadOp::DONT_CARE,
                 store_op: vk::AttachmentStoreOp::STORE,
@@ -110,13 +117,11 @@ impl UpscalerPipeline {
                 device,
                 instance,
                 physical_device,
-                target_format,
+                intermediate_format,
                 width,
                 height,
                 2,
-                vk::ImageUsageFlags::COLOR_ATTACHMENT
-                    | vk::ImageUsageFlags::SAMPLED
-                    | vk::ImageUsageFlags::STORAGE,
+                vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
             )?;
             let mut intermediate_views = [vk::ImageView::null(); 2];
             let mut intermediate_framebuffers = [vk::Framebuffer::null(); 2];
@@ -125,7 +130,7 @@ impl UpscalerPipeline {
                     &vk::ImageViewCreateInfo::default()
                         .image(intermediate_image)
                         .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(target_format)
+                        .format(intermediate_format)
                         .components(vk::ComponentMapping::default())
                         .subresource_range(vk::ImageSubresourceRange {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -159,10 +164,10 @@ impl UpscalerPipeline {
             )?;
             let pool = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
-                    .max_sets(8)
+                    .max_sets(12)
                     .pool_sizes(&[vk::DescriptorPoolSize {
                         ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                        descriptor_count: 8,
+                        descriptor_count: 12,
                     }]),
                 None,
             )?;
@@ -185,6 +190,35 @@ impl UpscalerPipeline {
                     .push_constant_ranges(std::slice::from_ref(&push_constant_range)),
                 None,
             )?;
+
+            let rcas_bindings = [
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(0)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(1)
+                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::FRAGMENT),
+            ];
+            let rcas_set_layout = device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&rcas_bindings),
+                None,
+            )?;
+            let rcas_layout = device.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(std::slice::from_ref(&rcas_set_layout))
+                    .push_constant_ranges(std::slice::from_ref(&push_constant_range)),
+                None,
+            )?;
+            let rcas_sets = device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(pool)
+                    .set_layouts(&[rcas_set_layout, rcas_set_layout]),
+            )?;
+            let rcas_fsr_sets = [rcas_sets[0], rcas_sets[1]];
 
             let vertex_module = create_shader_module(
                 device,
@@ -226,8 +260,13 @@ impl UpscalerPipeline {
                 vertex_module,
                 easu_module,
             )?;
-            let rcas_pipeline =
-                create_graphics_pipeline(device, render_pass, layout, vertex_module, rcas_module)?;
+            let rcas_pipeline = create_graphics_pipeline(
+                device,
+                render_pass,
+                rcas_layout,
+                vertex_module,
+                rcas_module,
+            )?;
             let sgsr_pipeline =
                 create_graphics_pipeline(device, render_pass, layout, vertex_module, sgsr_module)?;
             device.destroy_shader_module(vertex_module, None);
@@ -260,6 +299,32 @@ impl UpscalerPipeline {
                             image_view: intermediate_views[eye],
                             image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                         }])],
+                    &[],
+                );
+            }
+
+            for eye in 0..2 {
+                device.update_descriptor_sets(
+                    &[
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(rcas_fsr_sets[eye])
+                            .dst_binding(0)
+                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                            .image_info(&[vk::DescriptorImageInfo {
+                                sampler,
+                                image_view: intermediate_views[eye],
+                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            }]),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(rcas_fsr_sets[eye])
+                            .dst_binding(1)
+                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                            .image_info(&[vk::DescriptorImageInfo {
+                                sampler,
+                                image_view: intermediate_views[eye],
+                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            }]),
+                    ],
                     &[],
                 );
             }
@@ -308,7 +373,7 @@ impl UpscalerPipeline {
                     physical_device,
                     model,
                     sampler,
-                    set_layout,
+                    rcas_set_layout,
                     pool,
                     &intermediate_views,
                     width,
@@ -332,12 +397,16 @@ impl UpscalerPipeline {
                 rcas_pipeline,
                 sgsr_pipeline,
                 layout,
+                rcas_layout,
                 render_pass,
                 easu_render_pass,
                 set_layout,
+                rcas_set_layout,
                 pool,
                 source_sets,
                 intermediate_sets,
+                rcas_fsr_sets,
+                output_unorm: !format_is_srgb(target_format),
                 intermediate_image,
                 intermediate_memory,
                 intermediate_views,
@@ -366,10 +435,21 @@ impl UpscalerPipeline {
         params: &UpscalerParams,
     ) -> Result<(), vk::Result> {
         unsafe {
+            let use_ml = params.preset == UpscalerPreset::Ml && self.ml.is_some() && params.enabled;
             let key = (source_image.as_raw(), source_format.as_raw(), source_layer);
             let source_view = if let Some(view) = self.source_views.get(&key) {
                 *view
             } else {
+                if self.source_views.len() >= 32 {
+                    // Game textures can be recreated with a reused handle. Do
+                    // not keep views beyond a bounded cache; wait for the GPU
+                    // before destroying them.
+                    let _ = device.device_wait_idle();
+                    for view in self.source_views.values() {
+                        device.destroy_image_view(*view, None);
+                    }
+                    self.source_views.clear();
+                }
                 let view = device.create_image_view(
                     &vk::ImageViewCreateInfo::default()
                         .image(source_image)
@@ -412,7 +492,7 @@ impl UpscalerPipeline {
             device.cmd_pipeline_barrier(
                 command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
@@ -443,6 +523,14 @@ impl UpscalerPipeline {
                 max_depth: 1.0,
             };
             let con = params.fsr_easu_con(source_extent.0, source_extent.1);
+            let (ml_x, ml_y, ml_w, ml_h) = params.ml_bounds(0.001);
+            let mut flags = params.flags();
+            if use_ml {
+                flags |= FLAG_ML_ACTIVE;
+            }
+            if self.output_unorm {
+                flags |= FLAG_OUTPUT_UNORM;
+            }
             let push = PushConstants {
                 src_bounds: [
                     params.src_bounds.uMin,
@@ -454,16 +542,17 @@ impl UpscalerPipeline {
                 radius: params.radius,
                 feather: params.feather,
                 strength: params.strength,
-                flags: params.flags(),
+                flags,
                 dst_width: params.dst_width,
                 dst_height: params.dst_height,
                 con0: [con[0], con[1], con[2], con[3]],
                 con1: [con[4], con[5], con[6], con[7]],
                 con2: [con[8], con[9], con[10], con[11]],
                 con3: [con[12], con[13], con[14], con[15]],
+                ml_origin: [ml_x, ml_y],
+                ml_size: [ml_w, ml_h],
             };
 
-            let use_ml = params.preset == UpscalerPreset::Ml && self.ml.is_some();
             if params.preset == UpscalerPreset::Fsr || params.preset == UpscalerPreset::Ml {
                 device.cmd_begin_render_pass(
                     command_buffer,
@@ -504,7 +593,8 @@ impl UpscalerPipeline {
                 device.cmd_pipeline_barrier(
                     command_buffer,
                     vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER
+                        | vk::PipelineStageFlags::COMPUTE_SHADER,
                     vk::DependencyFlags::empty(),
                     &[],
                     &[],
@@ -533,7 +623,7 @@ impl UpscalerPipeline {
                         ml_output = Some(ml.output_set(eye));
                     }
                 }
-                let rcas_set = ml_output.unwrap_or(self.intermediate_sets[eye]);
+                let rcas_set = ml_output.unwrap_or(self.rcas_fsr_sets[eye]);
 
                 device.cmd_begin_render_pass(
                     command_buffer,
@@ -553,14 +643,14 @@ impl UpscalerPipeline {
                 device.cmd_bind_descriptor_sets(
                     command_buffer,
                     vk::PipelineBindPoint::GRAPHICS,
-                    self.layout,
+                    self.rcas_layout,
                     0,
                     &[rcas_set],
                     &[],
                 );
                 device.cmd_push_constants(
                     command_buffer,
-                    self.layout,
+                    self.rcas_layout,
                     vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
                     0,
                     std::slice::from_raw_parts(
@@ -657,7 +747,9 @@ impl UpscalerPipeline {
             device.destroy_pipeline(self.rcas_pipeline, None);
             device.destroy_pipeline(self.sgsr_pipeline, None);
             device.destroy_pipeline_layout(self.layout, None);
+            device.destroy_pipeline_layout(self.rcas_layout, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
+            device.destroy_descriptor_set_layout(self.rcas_set_layout, None);
             device.destroy_render_pass(self.render_pass, None);
             device.destroy_render_pass(self.easu_render_pass, None);
             for view in &self.intermediate_views {
@@ -712,7 +804,7 @@ struct MlResources {
     output_scale: f32,
     residual_clamp: f32,
     scale: f32,
-    initialized: bool,
+    initialized: [bool; 2],
 }
 
 impl MlResources {
@@ -919,15 +1011,26 @@ impl MlResources {
             let output_sets = [output_sets[0], output_sets[1]];
             for eye in 0..2 {
                 device.update_descriptor_sets(
-                    &[vk::WriteDescriptorSet::default()
-                        .dst_set(output_sets[eye])
-                        .dst_binding(0)
-                        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                        .image_info(&[vk::DescriptorImageInfo {
-                            sampler,
-                            image_view: views[eye],
-                            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        }])],
+                    &[
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(output_sets[eye])
+                            .dst_binding(0)
+                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                            .image_info(&[vk::DescriptorImageInfo {
+                                sampler,
+                                image_view: views[eye],
+                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            }]),
+                        vk::WriteDescriptorSet::default()
+                            .dst_set(output_sets[eye])
+                            .dst_binding(1)
+                            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                            .image_info(&[vk::DescriptorImageInfo {
+                                sampler,
+                                image_view: base_views[eye],
+                                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                            }]),
+                    ],
                     &[],
                 );
             }
@@ -952,7 +1055,7 @@ impl MlResources {
                 output_scale,
                 residual_clamp: model.residual_clamp,
                 scale: model.scale,
-                initialized: false,
+                initialized: [false; 2],
             })
         }
     }
@@ -993,12 +1096,12 @@ impl MlResources {
                 base_array_layer: eye as u32,
                 layer_count: 1,
             };
-            let old_layout = if self.initialized {
+            let old_layout = if self.initialized[eye] {
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
             } else {
                 vk::ImageLayout::UNDEFINED
             };
-            let (src_stage, src_access) = if self.initialized {
+            let (src_stage, src_access) = if self.initialized[eye] {
                 (
                     vk::PipelineStageFlags::FRAGMENT_SHADER,
                     vk::AccessFlags::SHADER_READ,
@@ -1091,7 +1194,7 @@ impl MlResources {
                     ..Default::default()
                 }],
             );
-            self.initialized = true;
+            self.initialized[eye] = true;
             crate::upscaler::diagnostics::record_ml_model(self.kind);
             true
         }
@@ -1136,17 +1239,18 @@ unsafe fn create_buffer(
         )?;
         let requirements = device.get_buffer_memory_requirements(buffer);
         let properties = instance.get_physical_device_memory_properties(physical_device);
-        let memory_type = (0..properties.memory_type_count)
-            .find(|index| {
-                requirements.memory_type_bits & (1 << index) != 0
-                    && properties.memory_types[*index as usize]
-                        .property_flags
-                        .contains(
-                            vk::MemoryPropertyFlags::HOST_VISIBLE
-                                | vk::MemoryPropertyFlags::HOST_COHERENT,
-                        )
-            })
-            .expect("ML weights need host-visible coherent memory");
+        let Some(memory_type) = (0..properties.memory_type_count).find(|index| {
+            requirements.memory_type_bits & (1 << index) != 0
+                && properties.memory_types[*index as usize]
+                    .property_flags
+                    .contains(
+                        vk::MemoryPropertyFlags::HOST_VISIBLE
+                            | vk::MemoryPropertyFlags::HOST_COHERENT,
+                    )
+        }) else {
+            device.destroy_buffer(buffer, None);
+            return Err(vk::Result::ERROR_FEATURE_NOT_PRESENT);
+        };
         let memory = device.allocate_memory(
             &vk::MemoryAllocateInfo::default()
                 .allocation_size(requirements.size)
@@ -1155,6 +1259,43 @@ unsafe fn create_buffer(
         )?;
         device.bind_buffer_memory(buffer, memory, 0)?;
         Ok((buffer, memory))
+    }
+}
+
+pub(super) unsafe fn probe_dp4a(device: &ash::Device) -> bool {
+    unsafe {
+        let binding = vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE);
+        let Ok(set_layout) = device.create_descriptor_set_layout(
+            &vk::DescriptorSetLayoutCreateInfo::default().bindings(std::slice::from_ref(&binding)),
+            None,
+        ) else {
+            return false;
+        };
+        let Ok(layout) = device.create_pipeline_layout(
+            &vk::PipelineLayoutCreateInfo::default().set_layouts(std::slice::from_ref(&set_layout)),
+            None,
+        ) else {
+            device.destroy_descriptor_set_layout(set_layout, None);
+            return false;
+        };
+        let probe = create_compute_pipeline(
+            device,
+            layout,
+            &include_bytes!(concat!(env!("OUT_DIR"), "/comp_dp4a_probe.spv"))[..],
+        );
+        let supported = if let Ok(pipeline) = probe {
+            device.destroy_pipeline(pipeline, None);
+            true
+        } else {
+            false
+        };
+        device.destroy_pipeline_layout(layout, None);
+        device.destroy_descriptor_set_layout(set_layout, None);
+        supported
     }
 }
 
@@ -1288,7 +1429,7 @@ unsafe fn create_image(
         )?;
         let requirements = device.get_image_memory_requirements(image);
         let memory_properties = instance.get_physical_device_memory_properties(physical_device);
-        let memory_type = (0..memory_properties.memory_type_count)
+        let Some(memory_type) = (0..memory_properties.memory_type_count)
             .find(|index| {
                 requirements.memory_type_bits & (1 << index) != 0
                     && memory_properties.memory_types[*index as usize]
@@ -1299,7 +1440,10 @@ unsafe fn create_image(
                 (0..memory_properties.memory_type_count)
                     .find(|index| requirements.memory_type_bits & (1 << index) != 0)
             })
-            .expect("upscaler intermediate image needs a memory type");
+        else {
+            device.destroy_image(image, None);
+            return Err(vk::Result::ERROR_FEATURE_NOT_PRESENT);
+        };
         let memory = device.allocate_memory(
             &vk::MemoryAllocateInfo::default()
                 .allocation_size(requirements.size)
@@ -1308,5 +1452,48 @@ unsafe fn create_image(
         )?;
         device.bind_image_memory(image, memory, 0)?;
         Ok((image, memory))
+    }
+}
+
+fn format_is_srgb(format: vk::Format) -> bool {
+    matches!(
+        format,
+        vk::Format::R8G8B8A8_SRGB
+            | vk::Format::B8G8R8A8_SRGB
+            | vk::Format::BC1_RGB_SRGB_BLOCK
+            | vk::Format::BC1_RGBA_SRGB_BLOCK
+            | vk::Format::BC2_SRGB_BLOCK
+            | vk::Format::BC3_SRGB_BLOCK
+            | vk::Format::BC7_SRGB_BLOCK
+            | vk::Format::ETC2_R8G8B8_SRGB_BLOCK
+            | vk::Format::ETC2_R8G8B8A1_SRGB_BLOCK
+            | vk::Format::ETC2_R8G8B8A8_SRGB_BLOCK
+            | vk::Format::ASTC_4X4_SRGB_BLOCK
+            | vk::Format::ASTC_5X4_SRGB_BLOCK
+            | vk::Format::ASTC_5X5_SRGB_BLOCK
+            | vk::Format::ASTC_6X5_SRGB_BLOCK
+            | vk::Format::ASTC_6X6_SRGB_BLOCK
+            | vk::Format::ASTC_8X5_SRGB_BLOCK
+            | vk::Format::ASTC_8X6_SRGB_BLOCK
+            | vk::Format::ASTC_8X8_SRGB_BLOCK
+            | vk::Format::ASTC_10X5_SRGB_BLOCK
+            | vk::Format::ASTC_10X6_SRGB_BLOCK
+            | vk::Format::ASTC_10X8_SRGB_BLOCK
+            | vk::Format::ASTC_10X10_SRGB_BLOCK
+            | vk::Format::ASTC_12X10_SRGB_BLOCK
+            | vk::Format::ASTC_12X12_SRGB_BLOCK
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn srgb_format_detection() {
+        assert!(format_is_srgb(vk::Format::R8G8B8A8_SRGB));
+        assert!(format_is_srgb(vk::Format::B8G8R8A8_SRGB));
+        assert!(!format_is_srgb(vk::Format::R8G8B8A8_UNORM));
+        assert!(!format_is_srgb(vk::Format::B8G8R8A8_UNORM));
     }
 }

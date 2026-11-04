@@ -25,6 +25,7 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
         ("ml_bench_coopmat.comp", "comp_ml_bench_coopmat.spv"),
         ("residual_cnn.comp", "comp_residual_cnn.spv"),
         ("srpo.comp", "comp_srpo.spv"),
+        ("dp4a_probe.comp", "comp_dp4a_probe.spv"),
     ];
 
     let cache_path = PathBuf::from(out_dir).join("shader_cache.json");
@@ -57,6 +58,9 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
         if let Some(cached) = old_cache.remove(&source)
             && Path::new(&cached.spirv) == output
             && !modified_since(&source, cached.last_modified)
+            && !headers
+                .iter()
+                .any(|header| modified_since(header, cached.last_modified))
         {
             add_to_cache(cached.last_modified);
             continue;

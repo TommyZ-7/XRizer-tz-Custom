@@ -1,6 +1,7 @@
 // Snapdragon Game Super Resolution 1 (SGSR 1).
 // Copyright (c) 2025 Qualcomm Innovation Center, Inc.
 // SPDX-License-Identifier: BSD-3-Clause
+// Full notice: shaders/src/SGSR-LICENSE.txt
 //
 // Adapted to Vulkan GLSL and XRizer's continuous radial weight field. The
 // 12-tap Lanczos-like base reconstruction is always applied; only the extra
@@ -22,6 +23,8 @@ layout(push_constant) uniform PushConstants {
     uvec4 con1;
     uvec4 con2;
     uvec4 con3;
+    uvec2 ml_origin;
+    uvec2 ml_size;
 } pc;
 
 layout(location = 0) in vec2 v_uv;
@@ -41,6 +44,13 @@ vec2 weight_y(float dx, float dy, float c, float stddev) {
     float x = ((dx * dx) + (dy * dy)) * 0.55 + clamp(abs(c) * stddev, 0.0, 1.0);
     float w = fast_lanczos2(x);
     return vec2(w, w * c);
+}
+
+vec4 encode_linear(vec3 linear, float alpha) {
+    if ((pc.flags & 16u) != 0u) {
+        return vec4(sqrt(max(linear, vec3(0.0))), alpha);
+    }
+    return vec4(linear, alpha);
 }
 
 float field_weight(vec2 uv) {
@@ -63,7 +73,7 @@ void main() {
     vec4 color = vec4(sqrt(max(raw_center.rgb, vec3(0.0))), raw_center.a);
 
     if ((pc.flags & 1u) != 0u && raw_center.a < 0.999) {
-        out_color = raw_center;
+        out_color = encode_linear(raw_center.rgb, raw_center.a);
         return;
     }
 
@@ -122,8 +132,6 @@ void main() {
         color.rgb = clamp(color.rgb + delta_y, 0.0, 1.0);
     }
 
-    color.rgb *= color.rgb;
-
     if ((pc.flags & 2u) != 0u) {
         float aspect = float(pc.dst_width) / float(pc.dst_height);
         float distance = length((v_uv - pc.center) * vec2(aspect, 1.0));
@@ -131,5 +139,8 @@ void main() {
         color.rgb = mix(color.rgb, vec3(0.0, 1.0, 0.0), ring * 0.6);
     }
 
+    if ((pc.flags & 16u) == 0u) {
+        color.rgb = color.rgb * color.rgb;
+    }
     out_color = vec4(color.rgb, raw_center.a);
 }

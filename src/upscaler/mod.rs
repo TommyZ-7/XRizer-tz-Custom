@@ -20,6 +20,8 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub const FLAG_PRESERVE_ALPHA: u32 = 1 << 0;
 pub const FLAG_SHOW_REGION: u32 = 1 << 1;
 pub const FLAG_ENHANCEMENT_ENABLED: u32 = 1 << 2;
+pub const FLAG_ML_ACTIVE: u32 = 1 << 3;
+pub const FLAG_OUTPUT_UNORM: u32 = 1 << 4;
 
 const RELOAD_INTERVAL_MS: u64 = 500;
 const COMPARE_INTERVAL_SECS: f32 = 2.0;

@@ -13,6 +13,8 @@ layout(push_constant) uniform PushConstants {
     uvec4 con1;
     uvec4 con2;
     uvec4 con3;
+    uvec2 ml_origin;
+    uvec2 ml_size;
 } pc;
 
 layout(location = 0) out vec2 v_uv;

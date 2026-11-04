@@ -15,10 +15,19 @@ layout(push_constant) uniform PushConstants {
     uvec4 con1;
     uvec4 con2;
     uvec4 con3;
+    uvec2 ml_origin;
+    uvec2 ml_size;
 } pc;
 
 layout(location = 0) in vec2 v_uv;
 layout(location = 0) out vec4 out_color;
+
+vec4 encode_linear(vec3 linear, float alpha) {
+    if ((pc.flags & 16u) != 0u) {
+        return vec4(sqrt(max(linear, vec3(0.0))), alpha);
+    }
+    return vec4(linear, alpha);
+}
 
 float field_weight(vec2 uv) {
     float aspect = float(pc.dst_width) / float(pc.dst_height);
@@ -35,16 +44,15 @@ void main() {
     vec4 center = texture(source_tex, source_uv);
 
     if ((pc.flags & 1u) != 0u && center.a < 0.999) {
-        out_color = center;
+        out_color = encode_linear(center.rgb, center.a);
         return;
     }
     if ((pc.flags & 4u) == 0u) {
-        out_color = center;
+        out_color = encode_linear(center.rgb, center.a);
         return;
     }
 
-    vec2 bounds_size = abs(pc.src_bounds.zw - pc.src_bounds.xy);
-    vec2 texel = bounds_size / vec2(textureSize(source_tex, 0));
+    vec2 texel = 1.0 / vec2(textureSize(source_tex, 0));
     vec3 north = texture(source_tex, source_uv + vec2(0.0, texel.y)).rgb;
     vec3 south = texture(source_tex, source_uv - vec2(0.0, texel.y)).rgb;
     vec3 east = texture(source_tex, source_uv + vec2(texel.x, 0.0)).rgb;
@@ -67,5 +75,5 @@ void main() {
         color = mix(color, vec3(0.0, 1.0, 0.0), ring * 0.6);
     }
 
-    out_color = vec4(color, center.a);
+    out_color = encode_linear(color, center.a);
 }

@@ -9,6 +9,7 @@ use openxr as xr;
 use std::collections::HashSet;
 use std::ffi::{CString, c_char};
 use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::SystemTime;
 use upscaler::UpscalerPipeline;
 
 struct RealSessionData {
@@ -23,6 +24,8 @@ struct RealSessionData {
     overlay_cache: Vec<Option<OverlayCache>>,
     upscaler_pipeline: Option<UpscalerPipeline>,
     upscaler_failed: bool,
+    ml_model_stamp: Option<SystemTime>,
+    ml_model_attempted: bool,
     width: u32,
     height: u32,
 }
@@ -176,6 +179,8 @@ impl GraphicsBackend for VulkanData {
             overlay_cache: (0..image_count).map(|_| None).collect(),
             upscaler_pipeline: None,
             upscaler_failed: false,
+            ml_model_stamp: None,
+            ml_model_attempted: false,
             width,
             height,
         };
@@ -239,8 +244,9 @@ impl GraphicsBackend for VulkanData {
             };
             self.instance
                 .get_physical_device_features2(self.physical_device, &mut features2);
-            vulkan13.shader_integer_dot_product == vk::TRUE
-                || dot.shader_integer_dot_product == vk::TRUE
+            (vulkan13.shader_integer_dot_product == vk::TRUE
+                || dot.shader_integer_dot_product == vk::TRUE)
+                && upscaler::probe_dp4a(&self.device)
         })
     }
 
@@ -280,22 +286,43 @@ impl GraphicsBackend for VulkanData {
         {
             let device = &self.device;
             let data = self.real_data.as_mut().unwrap();
-            if data.upscaler_pipeline.is_none() {
-                let ml_model = if params.preset == crate::upscaler::UpscalerPreset::Ml {
-                    let config = crate::upscaler::snapshot();
-                    let path = config
+            let ml_path = if params.preset == crate::upscaler::UpscalerPreset::Ml {
+                let config = crate::upscaler::snapshot();
+                Some(
+                    config
                         .model_path
-                        .unwrap_or_else(crate::upscaler::model::default_model_path);
-                    match crate::upscaler::model::load_cached(&path) {
+                        .unwrap_or_else(crate::upscaler::model::default_model_path),
+                )
+            } else {
+                None
+            };
+            let ml_mtime = ml_path
+                .as_ref()
+                .and_then(|path| std::fs::metadata(path).ok())
+                .and_then(|metadata| metadata.modified().ok());
+            let needs_ml_attempt = params.preset == crate::upscaler::UpscalerPreset::Ml
+                && (!data.ml_model_attempted || data.ml_model_stamp != ml_mtime);
+            if data.upscaler_pipeline.is_some() && needs_ml_attempt {
+                unsafe {
+                    self.device.queue_wait_idle(self.queue).unwrap();
+                    if let Some(old) = data.upscaler_pipeline.take() {
+                        old.destroy(&self.device);
+                    }
+                }
+            }
+            if data.upscaler_pipeline.is_none() {
+                let ml_model = match ml_path {
+                    Some(path) => match crate::upscaler::model::load_cached(&path) {
                         Ok(model) => Some(model),
                         Err(error) => {
                             warn!("ML model unavailable ({error}); falling back to FSR");
                             None
                         }
-                    }
-                } else {
-                    None
+                    },
+                    None => None,
                 };
+                data.ml_model_stamp = ml_mtime;
+                data.ml_model_attempted = params.preset == crate::upscaler::UpscalerPreset::Ml;
                 let created = unsafe {
                     UpscalerPipeline::new(
                         device,

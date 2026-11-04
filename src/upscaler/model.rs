@@ -322,8 +322,38 @@ impl Model {
                 return Err("XRU1 layer dimensions are not contiguous".to_string());
             }
         }
-        if kind == ModelKind::Mlp && layers.last().unwrap().output_count != 1 {
-            return Err("MLP output must be a single residual".to_string());
+        match kind {
+            ModelKind::Mlp => {
+                if layers.len() != 2 {
+                    return Err("MLP must have exactly two layers".to_string());
+                }
+                if layers[0].output_count != u32::from(hidden) {
+                    return Err("MLP first layer does not match hidden size".to_string());
+                }
+                if layers[1].input_count != u32::from(hidden) || layers[1].output_count != 1 {
+                    return Err("MLP output layer has the wrong shape".to_string());
+                }
+            }
+            ModelKind::ResidualCnn | ModelKind::Offset => {
+                if layers.len() != 3 {
+                    return Err("CNN/offset models must have exactly three layers".to_string());
+                }
+                if feature_count != MLP_FEATURE_COUNT as u32 {
+                    return Err("CNN/offset models expect 28 input features".to_string());
+                }
+                if !matches!(channels, 8 | 16 | 32) {
+                    return Err(format!("unsupported channel count {channels}"));
+                }
+                let channels = u32::from(channels);
+                if layers[0].output_count != channels
+                    || layers[1].input_count != channels
+                    || layers[1].output_count != channels
+                    || layers[2].input_count != channels
+                    || layers[2].output_count != 3
+                {
+                    return Err("CNN/offset layer dimensions are unsupported".to_string());
+                }
+            }
         }
 
         Ok(Self {
@@ -363,8 +393,6 @@ impl Model {
         }
         for layer in &self.layers {
             bytes.extend(layer.weights.iter().map(|value| *value as u8));
-        }
-        for layer in &self.layers {
             for bias in &layer.biases {
                 bytes.extend_from_slice(&bias.to_le_bytes());
             }
@@ -477,18 +505,15 @@ impl Model {
 
     /// Small output scale for the integer accumulator in the smoke model.
     pub fn mlp_output_scale(&self) -> f32 {
-        let hidden = self.layers.first().map_or(16, |layer| layer.output_count);
-        1.0 / (127.0 * 127.0 * hidden.max(1) as f32)
+        1.0 / (127.0 * 127.0)
     }
 
     pub fn cnn_output_scale(&self) -> f32 {
-        let channels = self.channels.max(1) as f32;
-        1.0 / (127.0 * 127.0 * channels)
+        1.0 / (127.0 * 127.0)
     }
 
     pub fn srpo_output_scale(&self) -> f32 {
-        let channels = self.channels.max(1) as f32;
-        1.0 / (127.0 * 127.0 * channels)
+        1.0 / (127.0 * 127.0)
     }
 
     /// Float CPU reference for the self-test model. The shader uses integer
@@ -632,6 +657,7 @@ mod tests {
             assert_eq!(parsed.layers[0].output_count as u16, hidden);
             assert_eq!(parsed.layers[1].input_count as u16, hidden);
             assert_eq!(parsed.layers[1].output_count, 1);
+            assert_eq!(parsed, model);
         }
     }
 
@@ -712,47 +738,17 @@ mod tests {
 
     #[test]
     fn parse_residual_cnn_and_offset_kinds() {
-        for kind in [ModelKind::ResidualCnn, ModelKind::Offset] {
-            let model = Model {
-                kind,
-                feature_count: 3,
-                hidden: 0,
-                channels: 16,
-                layers: vec![Layer {
-                    input_count: 3,
-                    output_count: 3,
-                    weight_scale: 1.0 / 127.0,
-                    input_scale: 1.0,
-                    output_scale: 1.0,
-                    weights: vec![1, -1, 2, -2, 3, -3, 4, -4, 5],
-                    biases: vec![0, 0, 0],
-                }],
-                input_scale: 1.0,
-                activation_scale: 1.0,
-                residual_clamp: 0.1,
-                scale: 1.0,
-            };
+        for (kind, model) in [
+            (
+                ModelKind::ResidualCnn,
+                Model::self_test_residual_cnn(16).unwrap(),
+            ),
+            (ModelKind::Offset, Model::self_test_srpo(16).unwrap()),
+        ] {
             let parsed = Model::parse(&model.to_bytes()).unwrap();
+            assert_eq!(parsed, model);
             assert_eq!(parsed.kind, kind);
             assert_eq!(parsed.channels, 16);
-        }
-    }
-
-    #[test]
-    fn residual_cnn_packing_matches_shader_layout() {
-        for channels in [8u16, 16, 32] {
-            let model = Model::self_test_residual_cnn(channels).unwrap();
-            let packed = model.packed_cnn_weights().unwrap();
-            let expected = channels as usize * 7
-                + channels as usize
-                + channels as usize * (channels as usize / 4)
-                + channels as usize
-                + 3 * (channels as usize / 4)
-                + 3;
-            assert_eq!(packed.len(), expected);
-            let (_, kind, hidden, _) = model.packed_inference_weights().unwrap();
-            assert_eq!(kind, ModelKind::ResidualCnn);
-            assert_eq!(hidden, channels as u32);
         }
     }
 

@@ -128,8 +128,28 @@ def t_lpips(frames) -> float | None:
         return 0.0
     loss = lpips.LPIPS(net="alex", verbose=False)
     values = []
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+    except Exception:
+        cv2 = None
     for previous, current in zip(frames, frames[1:]):
-        previous_tensor = torch.from_numpy(previous).permute(2, 0, 1).unsqueeze(0) * 2 - 1
+        warped = previous
+        if cv2 is not None:
+            previous_gray = cv2.cvtColor(previous, cv2.COLOR_RGB2GRAY)
+            current_gray = cv2.cvtColor(current, cv2.COLOR_RGB2GRAY)
+            flow = cv2.calcOpticalFlowFarneback(
+                previous_gray, current_gray, None, 0.5, 3, 15, 3, 5, 1.2, 0
+            )
+            height, width = previous_gray.shape
+            grid_x, grid_y = np.meshgrid(np.arange(width), np.arange(height))
+            warped = cv2.remap(
+                previous,
+                (grid_x + flow[..., 0]).astype(np.float32),
+                (grid_y + flow[..., 1]).astype(np.float32),
+                cv2.INTER_LINEAR,
+            )
+        previous_tensor = torch.from_numpy(warped).permute(2, 0, 1).unsqueeze(0) * 2 - 1
         current_tensor = torch.from_numpy(current).permute(2, 0, 1).unsqueeze(0) * 2 - 1
         with torch.no_grad():
             values.append(float(loss(previous_tensor, current_tensor).item()))

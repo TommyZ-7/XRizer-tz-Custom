@@ -73,6 +73,10 @@ static DEVICES: LazyLock<Mutex<HashMap<usize, DeviceState>>> =
 static PHYSICAL_DEVICES: LazyLock<Mutex<HashMap<usize, usize>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static LAST_INSTANCE: AtomicUsize = AtomicUsize::new(0);
+static LAST_GIPA: Mutex<Option<vk::PFN_vkGetInstanceProcAddr>> = Mutex::new(None);
+static LAST_GDPA: Mutex<Option<vk::PFN_vkGetDeviceProcAddr>> = Mutex::new(None);
+static LAST_CREATE_INSTANCE: Mutex<Option<vk::PFN_vkCreateInstance>> = Mutex::new(None);
+static LAST_CREATE_DEVICE: Mutex<Option<vk::PFN_vkCreateDevice>> = Mutex::new(None);
 
 fn raw(handle: impl vk::Handle) -> usize {
     handle.as_raw() as usize
@@ -149,12 +153,21 @@ unsafe extern "system" fn create_instance(
 ) -> vk::Result {
     unsafe {
         let Some(link) = find_instance_link((*create_info).p_next) else {
-            return vk::Result::ERROR_INITIALIZATION_FAILED;
+            log::warn!("XRizer layer: missing instance loader link; forwarding with last chain");
+            return match *LAST_CREATE_INSTANCE.lock().unwrap() {
+                Some(create) => create(create_info, allocator, instance),
+                None => vk::Result::ERROR_INITIALIZATION_FAILED,
+            };
         };
         let Some(next_link) = (*link).p_layer_info.as_ref() else {
-            return vk::Result::ERROR_INITIALIZATION_FAILED;
+            log::warn!("XRizer layer: empty instance loader link; forwarding with last chain");
+            return match *LAST_CREATE_INSTANCE.lock().unwrap() {
+                Some(create) => create(create_info, allocator, instance),
+                None => vk::Result::ERROR_INITIALIZATION_FAILED,
+            };
         };
         let next_gipa = next_link.pfn_next_get_instance_proc_addr;
+        *LAST_GIPA.lock().unwrap() = Some(next_gipa);
         advance_instance_link(link);
 
         let Some(next_create) = next_gipa(vk::Instance::null(), c"vkCreateInstance".as_ptr())
@@ -162,6 +175,7 @@ unsafe extern "system" fn create_instance(
             return vk::Result::ERROR_INITIALIZATION_FAILED;
         };
         let next_create: vk::PFN_vkCreateInstance = std::mem::transmute(next_create);
+        *LAST_CREATE_INSTANCE.lock().unwrap() = Some(next_create);
         let result = next_create(create_info, allocator, instance);
         if result == vk::Result::SUCCESS {
             let created = *instance;
@@ -372,13 +386,23 @@ unsafe extern "system" fn create_device(
 ) -> vk::Result {
     unsafe {
         let Some(link) = find_device_link((*create_info).p_next) else {
-            return vk::Result::ERROR_INITIALIZATION_FAILED;
+            log::warn!("XRizer layer: missing device loader link; forwarding with last chain");
+            return match *LAST_CREATE_DEVICE.lock().unwrap() {
+                Some(create) => create(physical_device, create_info, allocator, device),
+                None => vk::Result::ERROR_INITIALIZATION_FAILED,
+            };
         };
         let Some(next_link) = (*link).p_layer_info.as_ref() else {
-            return vk::Result::ERROR_INITIALIZATION_FAILED;
+            log::warn!("XRizer layer: empty device loader link; forwarding with last chain");
+            return match *LAST_CREATE_DEVICE.lock().unwrap() {
+                Some(create) => create(physical_device, create_info, allocator, device),
+                None => vk::Result::ERROR_INITIALIZATION_FAILED,
+            };
         };
         let next_gipa = next_link.pfn_next_get_instance_proc_addr;
         let next_gdpa = next_link.pfn_next_get_device_proc_addr;
+        *LAST_GIPA.lock().unwrap() = Some(next_gipa);
+        *LAST_GDPA.lock().unwrap() = Some(next_gdpa);
         advance_device_link(link);
 
         let instance = PHYSICAL_DEVICES

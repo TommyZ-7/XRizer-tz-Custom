@@ -1325,7 +1325,11 @@ impl<G: GraphicsBackend> FrameController<G> {
                     let input_width = new_info.width;
                     let input_height = new_info.height;
                     let input_sample_count = new_info.sample_count;
-                    let upscaler_params = if let Some(params) = self.frame_upscaler_params {
+                    let upscaler_params = if let Some(mut params) = self.frame_upscaler_params {
+                        // The weight/preset state is frame-locked, but the
+                        // submitted source bounds are per eye (double-wide or
+                        // double-tall textures use different subrects).
+                        params.src_bounds = bounds;
                         Some(params)
                     } else {
                         let upscaler_config = crate::upscaler::snapshot();
@@ -1370,7 +1374,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                             submit_flags,
                             upscaler_params.as_ref(),
                         ),
-                        flip_vertically: bounds.vertically_flipped(),
+                        flip_vertically: bounds.vertically_flipped() && upscaler_params.is_none(),
                     }
                 })
                 .or_else(|| {
@@ -1748,6 +1752,19 @@ mod tests {
                 .WaitGetPoses(std::ptr::null_mut(), 0, std::ptr::null_mut(), 0)
         }
 
+        fn submit_with_bounds(
+            &self,
+            eye: vr::EVREye,
+            bounds: vr::VRTextureBounds_t,
+        ) -> vr::EVRCompositorError {
+            self.comp.Submit(
+                eye,
+                &FakeGraphicsData::texture(&self.vk),
+                &bounds,
+                vr::EVRSubmitFlags::Default,
+            )
+        }
+
         fn submit(&self, eye: vr::EVREye) -> vr::EVRCompositorError {
             self.comp.Submit(
                 eye,
@@ -1956,6 +1973,44 @@ mod tests {
         assert!(!f.fake_supports_ml());
         assert_eq!(params.preset, crate::upscaler::UpscalerPreset::Fsr);
         assert_eq!(params.shader_kind(), 2);
+
+        crate::upscaler::reset_for_test();
+    }
+
+    #[test]
+    fn per_eye_bounds_are_not_shared() {
+        let _guard = crate::upscaler::test_lock();
+        crate::upscaler::reset_for_test();
+        let f = Fixture::new();
+        f.ensure_real_session(false);
+        f.set_fake_supports_upscaler(true);
+        crate::upscaler::set_for_test(crate::upscaler::UpscalerConfig {
+            enabled: true,
+            ..Default::default()
+        });
+
+        assert_eq!(f.wait_get_poses(), None);
+        f.set_should_render(true);
+        let left = vr::VRTextureBounds_t {
+            uMin: 0.0,
+            vMin: 0.0,
+            uMax: 0.5,
+            vMax: 1.0,
+        };
+        let right = vr::VRTextureBounds_t {
+            uMin: 0.5,
+            vMin: 0.0,
+            uMax: 1.0,
+            vMax: 1.0,
+        };
+        assert_eq!(f.submit_with_bounds(vr::EVREye::Left, left), None);
+        let left_params = f.last_upscaler_params().unwrap();
+        assert_eq!(left_params.src_bounds.uMin, 0.0);
+        assert_eq!(left_params.src_bounds.uMax, 0.5);
+        assert_eq!(f.submit_with_bounds(vr::EVREye::Right, right), None);
+        let right_params = f.last_upscaler_params().unwrap();
+        assert_eq!(right_params.src_bounds.uMin, 0.5);
+        assert_eq!(right_params.src_bounds.uMax, 1.0);
 
         crate::upscaler::reset_for_test();
     }

@@ -79,7 +79,6 @@ def write_xru1(
         if len(weights) != expected:
             raise ValueError(f"layer has {len(weights)} weights, expected {expected}")
         payload += bytes((int(w) & 0xFF) for w in weights)
-    for layer in layers:
         biases = layer["biases"]
         if len(biases) != int(layer["output_count"]):
             raise ValueError("bias count does not match output_count")
@@ -239,6 +238,21 @@ def fake_quant_i8(tensor, scale: float):
     return torch.clamp(torch.round(tensor * scale), -127, 127) / scale
 
 
+def quantize_linear(linear, input_scale: float):
+    torch = try_import_torch()
+    weights = torch.clamp(torch.round(linear.weight.detach().cpu() * 127.0), -127, 127).to(torch.int8)
+    bias_scale = 127.0 * input_scale
+    biases = (
+        torch.clamp(
+            torch.round(linear.bias.detach().cpu() * bias_scale),
+            -(2**31),
+            2**31 - 1,
+        )
+        .to(torch.int32)
+    )
+    return weights, biases
+
+
 def charbonnier_loss(prediction, target, epsilon: float = 1e-3):
     torch = try_import_torch()
     return torch.sqrt((prediction - target) ** 2 + epsilon**2).mean()
@@ -326,17 +340,16 @@ def export_mlp(model, output: Path, hidden: int) -> None:
     layers = []
     linear_layers = [m for m in model if isinstance(m, torch.nn.Linear)]
     for index, linear in enumerate(linear_layers):
-        weights = linear.weight.detach().cpu()
-        weights = fake_quant_i8(weights, 127.0).round().clamp(-127, 127).to(torch.int8)
-        biases = (linear.bias.detach().cpu() * 127.0).round().clamp(-(2**31), 2**31 - 1)
+        input_scale = 64.0 if index == 0 else 127.0
+        weights, biases = quantize_linear(linear, input_scale)
         layers.append(
             {
                 "input_count": int(weights.shape[1]),
                 "output_count": int(weights.shape[0]),
                 "weights": weights.flatten().tolist(),
-                "biases": biases.to(torch.int32).tolist(),
+                "biases": biases.tolist(),
                 "weight_scale": 1.0 / 127.0,
-                "input_scale": 64.0,
+                "input_scale": input_scale,
                 "output_scale": 1.0,
             }
         )
@@ -397,22 +410,105 @@ def export_srpo(model, output: Path, channels: int) -> None:
     )
 
 
+def load_capture_pairs(captures: Path, scale: float):
+    try:
+        import numpy as np  # type: ignore
+        from PIL import Image  # type: ignore
+    except Exception as error:
+        raise SystemExit(f"Pillow and NumPy are required for captures: {error}")
+    paths = sorted(
+        path
+        for path in captures.rglob("*")
+        if path.suffix.lower() in {".png", ".jpg", ".jpeg", ".bmp"}
+    )
+    if not paths:
+        raise SystemExit(f"no capture images under {captures}")
+    pairs = []
+    for path in paths:
+        rgb = np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
+        height, width = rgb.shape[:2]
+        lr_width = max(8, int(round(width * scale)))
+        lr_height = max(8, int(round(height * scale)))
+        lr_image = Image.fromarray(rgb).resize((lr_width, lr_height), Image.BOX)
+        base_image = lr_image.resize((width, height), Image.BILINEAR)
+        hr = rgb.astype(np.float32) / 255.0
+        base = np.asarray(base_image, dtype=np.float32) / 255.0
+        pairs.append((base, hr, scale))
+    return pairs
+
+
+def extract_batch(pairs, model_kind: str, batch_size: int, patch: int = 8):
+    import numpy as np  # type: ignore
+    import random
+    torch = try_import_torch()
+    if torch is None:
+        raise SystemExit("PyTorch is required for training")
+    features = []
+    targets = []
+    while len(features) < batch_size:
+        base, hr, scale = random.choice(pairs)
+        height, width = hr.shape[:2]
+        if height <= patch + 2 or width <= patch + 2:
+            continue
+        x = random.randint(1, width - patch - 1)
+        y = random.randint(1, height - patch - 1)
+        for yy in range(patch):
+            for xx in range(patch):
+                px = x + xx
+                py = y + yy
+                if model_kind == "mlp":
+                    # 5x5 luma patch in LR space, mapped from the HR pixel.
+                    lr_height = max(8, int(round(height * scale)))
+                    lr_width = max(8, int(round(width * scale)))
+                    lx = min(lr_width - 1, max(0, int(px * lr_width / width)))
+                    ly = min(lr_height - 1, max(0, int(py * lr_height / height)))
+                    luma = []
+                    for dy in range(-2, 3):
+                        for dx in range(-2, 3):
+                            sx = min(lr_width - 1, max(0, lx + dx))
+                            sy = min(lr_height - 1, max(0, ly + dy))
+                            sample = base[sy * height // lr_height, sx * width // lr_width]
+                            luma.append(
+                                0.299 * sample[0] + 0.587 * sample[1] + 0.114 * sample[2]
+                            )
+                    phase_x = (px * lr_width / width) - int(px * lr_width / width)
+                    phase_y = (py * lr_height / height) - int(py * lr_height / height)
+                    features.append(luma + [phase_x, phase_y, scale])
+                    target = hr[py, px] - base[py, px]
+                    targets.append([0.299 * target[0] + 0.587 * target[1] + 0.114 * target[2]])
+                else:
+                    taps = base[py - 1 : py + 2, px - 1 : px + 2].reshape(-1).tolist()
+                    taps.append(0.0)
+                    features.append(taps)
+                    targets.append((hr[py, px] - base[py, px]).tolist())
+    return torch.tensor(features, dtype=torch.float32), torch.tensor(targets, dtype=torch.float32)
+
+
 def train(args) -> None:
     torch = try_import_torch()
     if torch is None:
         raise SystemExit("PyTorch is required for training; install tools/requirements-upscaler.txt")
+    if args.captures is None:
+        raise SystemExit("--captures is required for training")
     metadata = load_metadata(args.captures)
     print(f"training {args.model} at scale {args.scale} for {metadata['game']}")
+    pairs = load_capture_pairs(args.captures, args.scale)
     model = build_torch_model(args, torch)
     optimizer = torch.optim.Adam(model.parameters(), lr=args.learning_rate)
-    features = torch.randn(args.batch_size, MLP_FEATURES)
-    target = torch.zeros(args.batch_size, 1)
     for step in range(args.steps):
+        features, target = extract_batch(pairs, args.model, args.batch_size)
         optimizer.zero_grad()
         prediction = model(features)
         loss = charbonnier_loss(prediction, target)
+        loss = loss + 0.1 * (prediction - target).abs().mean()
+        high_frequency_gain = torch.clamp(prediction.abs() - target.abs(), min=0.0).mean()
+        loss = loss + 0.01 * high_frequency_gain
         loss.backward()
         optimizer.step()
+        if args.qat:
+            with torch.no_grad():
+                for parameter in model.parameters():
+                    parameter.copy_(fake_quant_i8(parameter, 127.0))
         if step % 50 == 0:
             print(f"step {step}: loss={loss.item():.6f}")
     output = Path(args.output)
@@ -423,7 +519,6 @@ def train(args) -> None:
     else:
         export_srpo(model, output, args.channels or 16)
     print(f"wrote {output}")
-
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
@@ -436,6 +531,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
+    parser.add_argument("--qat", action="store_true")
     parser.add_argument("--self-test", action="store_true")
     return parser.parse_args(argv)
 
@@ -450,6 +546,8 @@ def main(argv: list[str] | None = None) -> int:
             assert parsed["feature_count"] == MLP_FEATURES
             assert parsed["hidden"] == hidden
             assert parsed["layers"][0]["output_count"] == hidden
+            assert parsed["layers"][0]["biases"] == [0] * hidden
+            assert parsed["layers"][1]["biases"] == [0]
         cnn_bytes = build_bytes(
             "residual_cnn",
             3,
