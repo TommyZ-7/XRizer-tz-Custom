@@ -4,6 +4,14 @@ on:
   push:
     tags:
       - v[0-9]+.[0-9]+**
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to create/release (e.g. v0.6.2)'
+        required: true
+      sha:
+        description: 'Commit SHA with a successful CI run'
+        required: true
 
 permissions:
   actions: read
@@ -13,6 +21,8 @@ permissions:
 jobs:
   vendor-dependencies:
     runs-on: ubuntu-latest
+    env:
+      SHA: ${{ inputs.sha || github.sha }}
     container:
       image: 'ghcr.io/supreeeme/xrizer-ubuntu:latest'
       credentials:
@@ -20,6 +30,8 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
     - uses: actions/checkout@v4
+      with:
+        ref: ${{ env.SHA }}
     - name: Vendor dependencies
       id: vendor
       run: |
@@ -36,13 +48,16 @@ jobs:
   get-latest-build:
     runs-on: ubuntu-latest
     needs: vendor-dependencies
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
+      SHA: ${{ inputs.sha || github.sha }}
     steps:
       - name: Get latest build
         id: latest-build
         uses: actions/github-script@v8
         env:
           REPO: ${{ github.repository }}
-          SHA: ${{ github.sha }}
+          SHA: ${{ env.SHA }}
         with:
           script: |
             const repo_split = process.env.REPO.split("/");
@@ -78,7 +93,7 @@ jobs:
       - name: Zip build
         id: zip
         env:
-            VERSION: ${{ github.ref_name }}
+            VERSION: ${{ env.TAG }}
         run: |
           mv xrizer xrizer-$VERSION
           zip -r xrizer-$VERSION.zip xrizer-$VERSION
@@ -86,8 +101,10 @@ jobs:
       - name: Draft release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
+          name: ${{ env.TAG }}
           draft: true
           files: |
-            ${{ format('xrizer-{0}.zip', github.ref_name) }}
+            ${{ format('xrizer-{0}.zip', env.TAG) }}
             dependencies.zip
           fail_on_unmatched_files: true
