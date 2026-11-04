@@ -4,6 +4,7 @@
 //! continuous weight field, fallback selection, and hot-reload behaviour can be
 //! tested on the CPU.
 
+pub mod inner_loop;
 pub mod math;
 pub mod model;
 

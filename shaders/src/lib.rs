@@ -21,6 +21,8 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
         ("enhance.frag", "frag_enhance.spv"),
         ("sgsr1.frag", "frag_sgsr1.spv"),
         ("mlp_dp4a.comp", "comp_mlp_dp4a.spv"),
+        ("ml_bench.comp", "comp_ml_bench.spv"),
+        ("ml_bench_coopmat.comp", "comp_ml_bench_coopmat.spv"),
     ];
 
     let cache_path = PathBuf::from(out_dir).join("shader_cache.json");
@@ -72,6 +74,7 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
 fn compile_shader(input: &Path, output: &Path, include_dir: &Path) {
     let success = Command::new("glslc")
         .arg("-O")
+        .arg("--target-env=vulkan1.3")
         .arg("-I")
         .arg(include_dir)
         .arg(input)
