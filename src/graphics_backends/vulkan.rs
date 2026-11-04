@@ -1,11 +1,18 @@
+mod capture;
+mod upscaler;
+
 use super::GraphicsBackend;
+use crate::upscaler::UpscalerParams;
 use ash::vk::{self, Handle};
+use capture::{CaptureSource, CaptureState};
 use log::warn;
 use openvr as vr;
 use openxr as xr;
 use std::collections::HashSet;
 use std::ffi::{CString, c_char};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, OnceLock};
+use std::time::{Instant, SystemTime};
+use upscaler::UpscalerPipeline;
 
 struct RealSessionData {
     images: Vec<vk::Image>,
@@ -17,6 +24,13 @@ struct RealSessionData {
     /// stay valid while it is set (OpenVR releases it via ClearOverlayTexture),
     /// so the image view and framebuffer can be reused across updates.
     overlay_cache: Vec<Option<OverlayCache>>,
+    upscaler_pipeline: Option<UpscalerPipeline>,
+    upscaler_failed: bool,
+    ml_model_stamp: Option<SystemTime>,
+    ml_model_attempted: bool,
+    capture: Option<CaptureState>,
+    width: u32,
+    height: u32,
 }
 
 struct OverlayCache {
@@ -38,7 +52,7 @@ impl OverlayCache {
 }
 
 impl RealSessionData {
-    unsafe fn destroy(&self, device: &ash::Device) {
+    unsafe fn destroy(&mut self, device: &ash::Device) {
         for cache in self.overlay_cache.iter().flatten() {
             unsafe {
                 cache.destroy(device);
@@ -48,6 +62,14 @@ impl RealSessionData {
             unsafe {
                 pipeline.destroy(device);
             }
+        }
+        if let Some(pipeline) = &self.upscaler_pipeline {
+            unsafe {
+                pipeline.destroy(device);
+            }
+        }
+        if let Some(capture) = self.capture.as_mut() {
+            capture.destroy(device);
         }
         unsafe {
             device.destroy_command_pool(self.pool, None);
@@ -62,6 +84,8 @@ pub struct VulkanData {
     pub device: ash::Device,
     pub queue: vk::Queue,
     pub queue_family_index: u32,
+    ml_feature_supported: OnceLock<bool>,
+    capture_config: Option<crate::capture::CaptureSettings>,
     real_data: Option<RealSessionData>,
 }
 
@@ -70,7 +94,7 @@ impl Drop for VulkanData {
         unsafe {
             self.device.device_wait_idle().unwrap();
         }
-        match &self.real_data {
+        match &mut self.real_data {
             // Temporary session - we created these handles, so let's destroy them
             None => unsafe {
                 self.device.destroy_device(None);
@@ -128,7 +152,7 @@ impl GraphicsBackend for VulkanData {
             None
         }
     }
-    fn store_swapchain_images(&mut self, images: Vec<u64>, format: u32) {
+    fn store_swapchain_images(&mut self, images: Vec<u64>, format: u32, width: u32, height: u32) {
         let images: Vec<vk::Image> = images.into_iter().map(vk::Image::from_raw).collect();
         let image_count = images.len();
         let pool = unsafe {
@@ -160,9 +184,16 @@ impl GraphicsBackend for VulkanData {
             bufs,
             overlay_pipeline: None,
             overlay_cache: (0..image_count).map(|_| None).collect(),
+            upscaler_pipeline: None,
+            upscaler_failed: false,
+            ml_model_stamp: None,
+            ml_model_attempted: false,
+            capture: None,
+            width,
+            height,
         };
 
-        if let Some(old_data) = self.real_data.replace(new_data) {
+        if let Some(mut old_data) = self.real_data.replace(new_data) {
             unsafe {
                 // The old command buffers may still be in flight; do not
                 // destroy their pool or overlay resources until the GPU is
@@ -199,14 +230,44 @@ impl GraphicsBackend for VulkanData {
         }
     }
 
+    fn supports_upscaler(&self) -> bool {
+        self.real_data
+            .as_ref()
+            .is_some_and(|data| !data.upscaler_failed)
+    }
+
+    fn supports_ml_upscaler(&self) -> bool {
+        *self.ml_feature_supported.get_or_init(|| unsafe {
+            let mut dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures {
+                shader_integer_dot_product: vk::FALSE,
+                ..Default::default()
+            };
+            let mut vulkan13 = vk::PhysicalDeviceVulkan13Features {
+                p_next: (&raw mut dot).cast(),
+                ..Default::default()
+            };
+            let mut features2 = vk::PhysicalDeviceFeatures2 {
+                p_next: (&raw mut vulkan13).cast(),
+                ..Default::default()
+            };
+            self.instance
+                .get_physical_device_features2(self.physical_device, &mut features2);
+            (vulkan13.shader_integer_dot_product == vk::TRUE
+                || dot.shader_integer_dot_product == vk::TRUE)
+                && upscaler::probe_dp4a(&self.device)
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn copy_texture_to_swapchain(
-        &self,
+        &mut self,
         eye: vr::EVREye,
         texture: *const vr::VRVulkanTextureData_t,
         color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
         submit_flags: vr::EVRSubmitFlags,
+        params: Option<&UpscalerParams>,
     ) -> xr::Extent2Di {
         let (texture, array_data) =
             if (submit_flags & vr::EVRSubmitFlags::VulkanTextureWithArrayData).0 > 0 {
@@ -216,12 +277,143 @@ impl GraphicsBackend for VulkanData {
                 (unsafe { &*texture }, None)
             };
 
+        let (extent, offset) = texture_extent_from_bounds(texture, bounds);
+        log::trace!("{eye:?} extent: {extent:?} | bounds: {bounds:?}");
+
+        let game_image = vk::Image::from_raw(texture.m_nImage);
+        let game_layer = array_data.map(|d| d.m_unArrayIndex).unwrap_or(0);
+        let raw_format = vk::Format::from_raw(texture.m_nFormat as _);
+        let game_format = get_colorspace_corrected_format(raw_format, color_space);
+
+        if let Some(config) = self.capture_config.clone() {
+            let data = self.real_data.as_mut().unwrap();
+            if data.capture.is_none() {
+                match CaptureState::new(config, &self.device, self.queue_family_index) {
+                    Ok(capture) => data.capture = Some(capture),
+                    Err(error) => {
+                        warn!("training capture disabled: {error}");
+                        self.capture_config = None;
+                    }
+                }
+            }
+            if let Some(capture) = data.capture.as_mut() {
+                capture.note_eye(
+                    eye as usize,
+                    CaptureSource {
+                        image: game_image,
+                        format: raw_format,
+                        layer: game_layer,
+                        width: texture.m_nWidth,
+                        height: texture.m_nHeight,
+                        bounds: [bounds.uMin, bounds.vMin, bounds.uMax, bounds.vMax],
+                        color_space: capture::color_space_name(color_space),
+                        sample_count: texture.m_nSampleCount,
+                    },
+                    Instant::now(),
+                );
+            }
+        }
+
+        if let Some(params) = params
+            && texture.m_nSampleCount == 1
+            && params.dst_width > 0
+            && params.dst_height > 0
+        {
+            let device = &self.device;
+            let data = self.real_data.as_mut().unwrap();
+            let ml_path = if params.preset == crate::upscaler::UpscalerPreset::Ml {
+                let config = crate::upscaler::snapshot();
+                Some(
+                    config
+                        .model_path
+                        .unwrap_or_else(crate::upscaler::model::default_model_path),
+                )
+            } else {
+                None
+            };
+            let ml_mtime = ml_path
+                .as_ref()
+                .and_then(|path| std::fs::metadata(path).ok())
+                .and_then(|metadata| metadata.modified().ok());
+            let needs_ml_attempt = params.preset == crate::upscaler::UpscalerPreset::Ml
+                && (!data.ml_model_attempted || data.ml_model_stamp != ml_mtime);
+            if data.upscaler_pipeline.is_some() && needs_ml_attempt {
+                unsafe {
+                    self.device.queue_wait_idle(self.queue).unwrap();
+                    if let Some(old) = data.upscaler_pipeline.take() {
+                        old.destroy(&self.device);
+                    }
+                }
+            }
+            if data.upscaler_pipeline.is_none() {
+                let ml_model = match ml_path {
+                    Some(path) => match crate::upscaler::model::load_cached(&path) {
+                        Ok(model) => Some(model),
+                        Err(error) => {
+                            warn!("ML model unavailable ({error}); falling back to FSR");
+                            None
+                        }
+                    },
+                    None => None,
+                };
+                data.ml_model_stamp = ml_mtime;
+                data.ml_model_attempted = params.preset == crate::upscaler::UpscalerPreset::Ml;
+                let created = unsafe {
+                    UpscalerPipeline::new(
+                        device,
+                        &self.instance,
+                        self.physical_device,
+                        data.format,
+                        &data.images,
+                        data.width,
+                        data.height,
+                        ml_model.as_deref(),
+                    )
+                };
+                match created {
+                    Ok(pipeline) => data.upscaler_pipeline = Some(pipeline),
+                    Err(error) => {
+                        warn!("Failed to create upscaler pipeline ({error:?}); using copy path");
+                        data.upscaler_failed = true;
+                    }
+                }
+            }
+            if let Some(pipeline) = data.upscaler_pipeline.as_mut() {
+                let buf = data.bufs[2 * image_index + eye as usize];
+                let mut rendered = true;
+                Self::record_only_on(device, buf, || unsafe {
+                    if let Err(error) = pipeline.record(
+                        device,
+                        buf,
+                        image_index,
+                        eye as usize,
+                        game_image,
+                        game_format,
+                        game_layer,
+                        (texture.m_nWidth, texture.m_nHeight),
+                        params,
+                    ) {
+                        warn!("Upscaler render setup failed ({error:?}); falling back");
+                        rendered = false;
+                    }
+                });
+                if rendered {
+                    return xr::Extent2Di {
+                        width: params.dst_width as _,
+                        height: params.dst_height as _,
+                    };
+                }
+                data.upscaler_failed = true;
+                return xr::Extent2Di {
+                    width: extent.width as _,
+                    height: extent.height as _,
+                };
+            }
+        }
+
         let data = self.real_data.as_ref().unwrap();
         let swapchain_image = data.images[image_index];
         let buf = data.bufs[2 * image_index + eye as usize];
-
-        let (extent, offset) = texture_extent_from_bounds(texture, bounds);
-        log::trace!("{eye:?} extent: {extent:?} | bounds: {bounds:?}");
 
         self.record_only(buf, || unsafe {
             // transition swapchain image to TRANSFER_DST
@@ -259,9 +451,6 @@ impl GraphicsBackend for VulkanData {
                 layer_count: 1,
             };
 
-            let game_image = vk::Image::from_raw(texture.m_nImage);
-            let game_layer = array_data.map(|d| d.m_unArrayIndex).unwrap_or(0);
-
             let copy = vk::ImageResolve {
                 src_subresource: vk::ImageSubresourceLayers {
                     base_array_layer: game_layer,
@@ -276,10 +465,6 @@ impl GraphicsBackend for VulkanData {
                 extent,
             };
 
-            let game_format = get_colorspace_corrected_format(
-                vk::Format::from_raw(texture.m_nFormat as _),
-                color_space,
-            );
             if texture.m_nSampleCount > 1 {
                 self.device.cmd_resolve_image(
                     buf,
@@ -352,7 +537,7 @@ impl GraphicsBackend for VulkanData {
         }
     }
 
-    fn flush_copies(&self, image_index: usize) {
+    fn flush_copies(&mut self, image_index: usize) {
         // Stale bufs are never flushed: the caller only flushes when both eyes
         // were really copied this frame, and every copy re-records its buf.
         let Some(data) = self.real_data.as_ref() else {
@@ -360,6 +545,18 @@ impl GraphicsBackend for VulkanData {
         };
         let bufs = [data.bufs[2 * image_index], data.bufs[2 * image_index + 1]];
         self.submit_bufs(&bufs);
+
+        let Self {
+            instance,
+            physical_device,
+            device,
+            queue,
+            real_data,
+            ..
+        } = self;
+        if let Some(capture) = real_data.as_mut().and_then(|data| data.capture.as_mut()) {
+            capture.flush(device, instance, *physical_device, *queue, Instant::now());
+        }
     }
 
     fn copy_overlay_to_swapchain(
@@ -590,8 +787,12 @@ impl VulkanData {
     /// Record without submitting; staged eye copies are sent together by
     /// `flush_copies` once both eyes are in.
     pub fn record_only(&self, buf: vk::CommandBuffer, cmds: impl FnOnce()) {
+        Self::record_only_on(&self.device, buf, cmds);
+    }
+
+    fn record_only_on(device: &ash::Device, buf: vk::CommandBuffer, cmds: impl FnOnce()) {
         unsafe {
-            self.device
+            device
                 .begin_command_buffer(
                     buf,
                     &vk::CommandBufferBeginInfo::default()
@@ -603,7 +804,7 @@ impl VulkanData {
         cmds();
 
         unsafe {
-            self.device.end_command_buffer(buf).unwrap();
+            device.end_command_buffer(buf).unwrap();
         }
     }
 
@@ -640,6 +841,8 @@ impl VulkanData {
             device,
             queue: vk::Queue::from_raw(data.m_pQueue as _),
             queue_family_index: data.m_nQueueFamilyIndex,
+            ml_feature_supported: OnceLock::new(),
+            capture_config: crate::capture::CaptureSettings::from_env(),
             real_data: Default::default(),
         }
     }
@@ -720,6 +923,8 @@ impl VulkanData {
             device,
             queue,
             queue_family_index,
+            ml_feature_supported: OnceLock::new(),
+            capture_config: crate::capture::CaptureSettings::from_env(),
             real_data: Default::default(),
         }
     }

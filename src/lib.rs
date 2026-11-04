@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 
 mod applications;
+mod capture;
 mod chaperone;
 mod clientcore;
 mod compositor;
@@ -14,6 +15,7 @@ mod rendermodels;
 mod screenshots;
 mod settings;
 mod system;
+mod upscaler;
 
 #[cfg(not(test))]
 mod error_dialog;

@@ -1,0 +1,7 @@
+torch>=2.2
+torchvision>=0.17
+numpy>=1.26
+Pillow>=10.0
+opencv-python-headless>=4.9
+lpips>=0.1.4
+scikit-image>=0.22

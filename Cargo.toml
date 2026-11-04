@@ -27,7 +27,7 @@ codegen-units = 1
 strip = true
 
 [workspace]
-members = ["xbuild"]
+members = ["xbuild", "vulkan-layer", "vulkan-layer-probe"]
 
 [workspace.package]
 rust-version = "1.85"
@@ -74,6 +74,8 @@ libc = "0.2.169"
 derive_more = { workspace = true }
 gl = "0.14.0"
 obj = "0.10.2"
+png = "0.17"
+notify-rust = "4"
 lz4_flex = { version = "0.12.0", default-features = false, features = ["frame"] }
 
 [build-dependencies]

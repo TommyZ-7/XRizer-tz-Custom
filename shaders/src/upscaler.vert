@@ -1,0 +1,27 @@
+#version 450
+
+layout(push_constant) uniform PushConstants {
+    vec4 src_bounds;
+    vec2 center;
+    float radius;
+    float feather;
+    float strength;
+    uint flags;
+    uint dst_width;
+    uint dst_height;
+    uvec4 con0;
+    uvec4 con1;
+    uvec4 con2;
+    uvec4 con3;
+    uvec2 ml_origin;
+    uvec2 ml_size;
+} pc;
+
+layout(location = 0) out vec2 v_uv;
+
+void main() {
+    // Full-screen triangle. v_uv covers [0, 1] over the output.
+    vec2 uv = vec2((gl_VertexIndex << 1) & 2, gl_VertexIndex & 2);
+    v_uv = uv;
+    gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
+}

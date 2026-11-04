@@ -1,0 +1,18 @@
+[package]
+name = "xrizer-vulkan-layer"
+version = "0.1.0"
+edition.workspace = true
+resolver = "2"
+license = "GPL-3.0-or-later"
+description = "XRizer opt-in Vulkan feature-enablement layer"
+
+[lib]
+name = "xrizer_upscaler_layer"
+crate-type = ["cdylib"]
+
+[dependencies]
+ash = { workspace = true }
+log = { workspace = true }
+
+[lints]
+workspace = true

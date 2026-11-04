@@ -30,7 +30,8 @@ enum Message {
 
 fn main() {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
-    let mut cmd = Command::new(cargo)
+    let cargo_args: Vec<_> = std::env::args_os().skip(1).collect();
+    let mut cmd = Command::new(&cargo)
         .args([
             "build",
             "--message-format",
@@ -38,7 +39,7 @@ fn main() {
             "-p",
             "xrizer",
         ])
-        .args(std::env::args_os().skip(1))
+        .args(&cargo_args)
         .stdout(Stdio::piped())
         .spawn()
         .expect("Failed to call cargo");
@@ -88,11 +89,43 @@ fn main() {
     if !cmd.wait().expect("waiting for build failed").success() {
         std::process::exit(1);
     }
+
+    // Build the opt-in Vulkan layer and stage it next to the runtime. The
+    // manifest keeps a relative library_path so the directory is relocatable.
+    let layer_status = Command::new(&cargo)
+        .args(["build", "-p", "xrizer-vulkan-layer"])
+        .args(&cargo_args)
+        .status()
+        .expect("Failed to build xrizer-vulkan-layer");
+    if !layer_status.success() {
+        std::process::exit(1);
+    }
+
     let lib_path = PathBuf::from(lib_path.expect("lib path missing"));
+    let parent = lib_path.parent().unwrap();
+    let layer_out = parent.join("vulkan/implicit_layer.d");
+    if let Err(error) = std::fs::create_dir_all(&layer_out) {
+        eprintln!("Failed to create layer directory {layer_out:?}: {error:?}");
+        std::process::exit(1);
+    }
+    let layer_lib = parent.join("libxrizer_upscaler_layer.so");
+    if let Err(error) = std::fs::copy(&layer_lib, layer_out.join("libxrizer_upscaler_layer.so")) {
+        eprintln!("Failed to copy {layer_lib:?}: {error:?}");
+        std::process::exit(1);
+    }
+    let layer_manifest =
+        PathBuf::from(std::env!("CARGO_MANIFEST_DIR")).join("../vulkan-layer/manifest.json.in");
+    if let Err(error) = std::fs::copy(
+        &layer_manifest,
+        layer_out.join("xrizer_upscaler_layer.json"),
+    ) {
+        eprintln!("Failed to copy {layer_manifest:?}: {error:?}");
+        std::process::exit(1);
+    }
+
     let platform_dir = platform_dir.expect("openvr platform directory should be known");
     let vrclient_name = vrclient_name.expect("vrclient name should be known");
 
-    let parent = lib_path.parent().unwrap();
     let platform_path = parent.join(platform_dir);
     match std::fs::create_dir_all(&platform_path) {
         Ok(_) => (),

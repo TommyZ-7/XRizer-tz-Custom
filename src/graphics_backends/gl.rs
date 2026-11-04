@@ -184,6 +184,8 @@ impl GraphicsBackend for GlData {
         &mut self,
         images: Vec<<Self::Api as xr::Graphics>::SwapchainImage>,
         format: u32,
+        _width: u32,
+        _height: u32,
     ) {
         self.images = images;
         self.format = format;
@@ -222,14 +224,16 @@ impl GraphicsBackend for GlData {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn copy_texture_to_swapchain(
-        &self,
+        &mut self,
         eye: vr::EVREye,
         texture: Self::OpenVrTexture,
         _color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         image_index: usize,
         _submit_flags: vr::EVRSubmitFlags,
+        _params: Option<&crate::upscaler::UpscalerParams>,
     ) -> xr::Extent2Di {
         let swapchain_texture = self.images[image_index];
 
@@ -311,6 +315,7 @@ impl GraphicsBackend for GlData {
             bounds,
             image_index,
             vr::EVRSubmitFlags::Default,
+            None,
         )
     }
 }

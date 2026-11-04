@@ -1,3 +1,4 @@
+use super::shutter::ShutterActions;
 use super::{Input, PoseData, WriteOnDrop};
 use crate::{
     input::{
@@ -54,12 +55,14 @@ impl<C: openxr_data::Compositor> Input<C> {
             openxr: &self.openxr,
             input_data,
             legacy: &legacy,
+            shutter: self.shutter.as_ref(),
         });
 
         struct Runner<'a, C: openxr_data::Compositor> {
             openxr: &'a super::OpenXrData<C>,
             input_data: &'a super::InputSessionData,
             legacy: &'a LegacyActionData,
+            shutter: Option<&'a ShutterActions>,
         }
 
         impl<C: openxr_data::Compositor> RunWithProfile for Runner<'_, C> {
@@ -69,7 +72,16 @@ impl<C: openxr_data::Compositor> Input<C> {
                 }
 
                 let conv = super::profiles::InputToXrPath::new(&self.openxr.instance);
-                let bindings = P::legacy_bindings(&conv);
+                let legacy_bindings = P::legacy_bindings(&conv);
+                let mut bindings: Vec<_> = legacy_bindings
+                    .into_iter(
+                        &self.legacy.actions,
+                        self.input_data.pose_data.get().unwrap(),
+                    )
+                    .collect();
+                if let Some(shutter) = self.shutter {
+                    bindings.extend(shutter.bindings::<P>(&self.openxr.instance));
+                }
                 self.openxr
                     .instance
                     .suggest_interaction_profile_bindings(
@@ -77,28 +89,24 @@ impl<C: openxr_data::Compositor> Input<C> {
                             .instance
                             .string_to_path(P::profile_path())
                             .unwrap(),
-                        &bindings
-                            .into_iter(
-                                &self.legacy.actions,
-                                self.input_data.pose_data.get().unwrap(),
-                            )
-                            .collect::<Vec<_>>(),
+                        &bindings,
                     )
                     .unwrap();
             }
         }
 
         let pose_set = &input_data.pose_data.get().unwrap().set;
-
-        session
-            .attach_action_sets(&[&legacy.set, pose_set])
-            .unwrap();
-        session
-            .sync_actions(&[
-                xr::ActiveActionSet::new(&legacy.set),
-                xr::ActiveActionSet::new(pose_set),
-            ])
-            .unwrap();
+        let mut attach_sets = vec![&legacy.set, pose_set];
+        let mut sync_sets = vec![
+            xr::ActiveActionSet::new(&legacy.set),
+            xr::ActiveActionSet::new(pose_set),
+        ];
+        if let Some(shutter) = &self.shutter {
+            attach_sets.push(&shutter.set);
+            sync_sets.push(xr::ActiveActionSet::new(&shutter.set));
+        }
+        session.attach_action_sets(&attach_sets).unwrap();
+        session.sync_actions(&sync_sets).unwrap();
 
         input_data
             .actions

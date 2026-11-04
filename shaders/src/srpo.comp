@@ -1,0 +1,159 @@
+// SRPO-style offset/kernel prediction (experimental next stage).
+// A tiny INT8 CNN predicts a source-space offset and confidence; guided
+// fusion nudges the classical base only where confidence and weight are high.
+#version 450
+#extension GL_EXT_integer_dot_product : require
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 0) uniform sampler2D source_tex;
+layout(set = 0, binding = 1) uniform sampler2D base_tex;
+layout(set = 0, binding = 2, rgba8) uniform image2D output_image;
+layout(set = 0, binding = 3) buffer Weights {
+    int weights[];
+};
+
+layout(push_constant) uniform PushConstants {
+    vec4 src_bounds;
+    vec2 center;
+    float radius;
+    float feather;
+    float strength;
+    uint flags;
+    uint dst_width;
+    uint dst_height;
+    uvec2 ml_origin;
+    uvec2 ml_size;
+    uint hidden;
+    float input_scale;
+    float activation_limit;
+    float output_scale;
+    float residual_clamp;
+    float scale;
+} pc;
+
+float field_weight(vec2 uv) {
+    float aspect = float(pc.dst_width) / float(pc.dst_height);
+    vec2 delta = (uv - pc.center) * vec2(aspect, 1.0);
+    float distance = length(delta);
+    if (pc.feather <= 0.0) {
+        return distance <= pc.radius ? 1.0 : 0.0;
+    }
+    return 1.0 - smoothstep(pc.radius, pc.radius + pc.feather, distance);
+}
+
+uint pack_lane(uint packed, uint lane, int value) {
+    return packed | ((uint(value) & 0xffu) << (8u * lane));
+}
+
+int dot_groups(int base, uint activations[8], int groups) {
+    int accumulator = 0;
+    for (int group = 0; group < groups; group++) {
+        accumulator += dotPacked4x8EXT(weights[base + group], int(activations[group]));
+    }
+    return accumulator;
+}
+
+float luma(vec3 color) {
+    return dot(color, vec3(0.299, 0.587, 0.114));
+}
+
+void main() {
+    uvec2 pixel = gl_GlobalInvocationID.xy + pc.ml_origin;
+    if (pixel.x >= pc.ml_origin.x + pc.ml_size.x || pixel.y >= pc.ml_origin.y + pc.ml_size.y) {
+        return;
+    }
+
+    vec2 uv = (vec2(pixel) + 0.5) / vec2(pc.dst_width, pc.dst_height);
+    vec2 source_uv = mix(pc.src_bounds.xy, pc.src_bounds.zw, uv);
+    vec4 base = texture(base_tex, uv);
+    vec4 source = texture(source_tex, source_uv);
+
+    if ((pc.flags & 1u) != 0u && source.a < 0.999) {
+        imageStore(output_image, ivec2(pixel), base);
+        return;
+    }
+    if ((pc.flags & 4u) == 0u || pc.hidden == 0u) {
+        imageStore(output_image, ivec2(pixel), base);
+        return;
+    }
+
+    vec2 texel = 1.0 / vec2(textureSize(base_tex, 0));
+    float features[28];
+    int index = 0;
+    for (int y = -1; y <= 1; y++) {
+        for (int x = -1; x <= 1; x++) {
+            vec3 tap = texture(base_tex, uv + vec2(x, y) * texel).rgb;
+            features[index++] = tap.r;
+            features[index++] = tap.g;
+            features[index++] = tap.b;
+        }
+    }
+    features[27] = 0.0;
+
+    uint quantized[8] = uint[8](0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+    for (int i = 0; i < 28; i++) {
+        int value = int(clamp(round(features[i] * pc.input_scale), -127.0, 127.0));
+        quantized[i / 4] = pack_lane(quantized[i / 4], uint(i % 4), value);
+    }
+
+    int channels = int(pc.hidden);
+    int groups2 = channels / 4;
+    uint current[8] = uint[8](0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+    uint next[8] = uint[8](0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
+
+    int layer1_bias = channels * 7;
+    for (int out_index = 0; out_index < channels; out_index++) {
+        int accumulator = dot_groups(out_index * 7, quantized, 7);
+        accumulator += weights[layer1_bias + out_index];
+        int activation = int(clamp(float(accumulator), -pc.activation_limit, pc.activation_limit));
+        current[out_index / 4] = pack_lane(
+            current[out_index / 4],
+            uint(out_index % 4),
+            activation
+        );
+    }
+
+    int layer2_base = layer1_bias + channels;
+    int layer2_bias = layer2_base + channels * groups2;
+    for (int out_index = 0; out_index < channels; out_index++) {
+        int accumulator = dot_groups(layer2_base + out_index * groups2, current, groups2);
+        accumulator += weights[layer2_bias + out_index];
+        int activation = int(clamp(float(accumulator), -pc.activation_limit, pc.activation_limit));
+        next[out_index / 4] = pack_lane(
+            next[out_index / 4],
+            uint(out_index % 4),
+            activation
+        );
+    }
+
+    int layer3_base = layer2_bias + channels;
+    int layer3_bias = layer3_base + 3 * groups2;
+    float outputs[3];
+    for (int out_index = 0; out_index < 3; out_index++) {
+        int accumulator = dot_groups(layer3_base + out_index * groups2, next, groups2);
+        accumulator += weights[layer3_bias + out_index];
+        outputs[out_index] = float(accumulator);
+    }
+
+    vec2 offset = clamp(vec2(outputs[0], outputs[1]) * pc.scale, vec2(-1.5), vec2(1.5));
+    float confidence = clamp(outputs[2] * pc.output_scale, 0.0, 1.0);
+
+    // Flat content keeps the classical base; offsets are only trusted where
+    // there is local contrast to guide them.
+    vec3 north = texture(base_tex, uv + vec2(0.0, texel.y)).rgb;
+    vec3 south = texture(base_tex, uv - vec2(0.0, texel.y)).rgb;
+    vec3 east = texture(base_tex, uv + vec2(texel.x, 0.0)).rgb;
+    vec3 west = texture(base_tex, uv - vec2(texel.x, 0.0)).rgb;
+    float contrast = max(max(luma(north), luma(south)), max(luma(east), luma(west)))
+        - min(min(luma(north), luma(south)), min(luma(east), luma(west)));
+    confidence *= step(0.02, contrast);
+
+    vec2 source_texel = 1.0 / vec2(textureSize(source_tex, 0));
+    vec3 sampled = texture(source_tex, source_uv + offset * source_texel).rgb;
+    vec3 delta = clamp(sampled - base.rgb, vec3(-0.15), vec3(0.15));
+    float weight = pc.strength * field_weight(uv);
+
+    vec3 color = clamp(base.rgb + delta * confidence * weight, 0.0, 1.0);
+    imageStore(output_image, ivec2(pixel), vec4(color, base.a));
+}

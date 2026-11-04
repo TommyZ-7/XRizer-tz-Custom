@@ -1,2 +1,8 @@
 /target
 /runtime
+
+captures/
+*.xru
+*.xru.tmp
+tools/runs/
+tools/__pycache__/

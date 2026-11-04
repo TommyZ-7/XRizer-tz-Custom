@@ -109,6 +109,25 @@ fn make_version() -> u32 {
 }
 
 impl<C: Compositor> OpenXrData<C> {
+    /// Runtime-recommended per-eye render target size before supersampling.
+    /// Cached until the next session restart.
+    pub fn base_recommended_view_size(&self) -> (u32, u32) {
+        let mut cached = self.recommended_view_size.lock().unwrap();
+        *cached.get_or_insert_with(|| {
+            let views = self
+                .instance
+                .enumerate_view_configuration_views(
+                    self.system_id,
+                    xr::ViewConfigurationType::PRIMARY_STEREO,
+                )
+                .unwrap();
+            (
+                views[0].recommended_image_rect_width,
+                views[0].recommended_image_rect_height,
+            )
+        })
+    }
+
     pub fn new(injector: &Injector) -> Result<Self, InitError> {
         let platform_info = ();
 

@@ -14,6 +14,20 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
     let shaders = [
         ("overlay.vert", "vert_overlay.spv"),
         ("overlay.frag", "frag_overlay.spv"),
+        ("upscaler.vert", "vert_upscaler.spv"),
+        ("upscaler.frag", "frag_upscaler.spv"),
+        ("fast.frag", "frag_fast.spv"),
+        ("fsr_easu.frag", "frag_fsr_easu.spv"),
+        ("enhance.frag", "frag_enhance.spv"),
+        ("sgsr1.frag", "frag_sgsr1.spv"),
+        ("mlp_dp4a.comp", "comp_mlp_dp4a.spv"),
+        ("ml_bench.comp", "comp_ml_bench.spv"),
+        ("ml_bench_coopmat.comp", "comp_ml_bench_coopmat.spv"),
+        ("residual_cnn.comp", "comp_residual_cnn.spv"),
+        ("srpo.comp", "comp_srpo.spv"),
+        ("dp4a_probe.comp", "comp_dp4a_probe.spv"),
+        ("capture.vert", "vert_capture.spv"),
+        ("capture.frag", "frag_capture.spv"),
     ];
 
     let cache_path = PathBuf::from(out_dir).join("shader_cache.json");
@@ -25,6 +39,10 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
 
     let shader_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let out_dir = PathBuf::from(out_dir);
+    let headers: Vec<PathBuf> = ["ffx_a.h", "ffx_fsr1.h"]
+        .into_iter()
+        .map(|header| shader_dir.join(header))
+        .collect();
     for (source, output) in shaders {
         let source = shader_dir.join(source);
         let output = out_dir.join(output);
@@ -42,23 +60,31 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
         if let Some(cached) = old_cache.remove(&source)
             && Path::new(&cached.spirv) == output
             && !modified_since(&source, cached.last_modified)
+            && !headers
+                .iter()
+                .any(|header| modified_since(header, cached.last_modified))
         {
             add_to_cache(cached.last_modified);
             continue;
         }
 
-        compile_shader(&source, &output);
+        compile_shader(&source, &output, &shader_dir);
         add_to_cache(SystemTime::now());
     }
 
     let cache = std::fs::File::create(cache_path).expect("Couldn't create cache file");
     serde_json::to_writer(cache, &new_cache).expect("Couldn't write cache");
-    new_cache.into_keys().collect()
+    let mut outputs: Vec<PathBuf> = new_cache.into_keys().collect();
+    outputs.extend(headers);
+    outputs
 }
 
-fn compile_shader(input: &Path, output: &Path) {
+fn compile_shader(input: &Path, output: &Path, include_dir: &Path) {
     let success = Command::new("glslc")
         .arg("-O")
+        .arg("--target-env=vulkan1.3")
+        .arg("-I")
+        .arg(include_dir)
         .arg(input)
         .arg("-o")
         .arg(output)
