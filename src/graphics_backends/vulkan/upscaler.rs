@@ -208,29 +208,27 @@ impl UpscalerPipeline {
         source_format: vk::Format,
         source_layer: u32,
         params: &UpscalerParams,
-    ) {
+    ) -> Result<(), vk::Result> {
         unsafe {
             let key = (source_image.as_raw(), source_format.as_raw(), source_layer);
             let source_view = if let Some(view) = self.source_views.get(&key) {
                 *view
             } else {
-                let view = device
-                    .create_image_view(
-                        &vk::ImageViewCreateInfo::default()
-                            .image(source_image)
-                            .view_type(vk::ImageViewType::TYPE_2D)
-                            .format(source_format)
-                            .components(vk::ComponentMapping::default())
-                            .subresource_range(vk::ImageSubresourceRange {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                base_mip_level: 0,
-                                level_count: 1,
-                                base_array_layer: source_layer,
-                                layer_count: 1,
-                            }),
-                        None,
-                    )
-                    .unwrap();
+                let view = device.create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(source_image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(source_format)
+                        .components(vk::ComponentMapping::default())
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: source_layer,
+                            layer_count: 1,
+                        }),
+                    None,
+                )?;
                 self.source_views.insert(key, view);
                 view
             };
@@ -363,6 +361,7 @@ impl UpscalerPipeline {
                     ..Default::default()
                 }],
             );
+            Ok(())
         }
     }
 

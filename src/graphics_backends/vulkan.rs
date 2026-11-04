@@ -22,6 +22,7 @@ struct RealSessionData {
     /// so the image view and framebuffer can be reused across updates.
     overlay_cache: Vec<Option<OverlayCache>>,
     upscaler_pipeline: Option<UpscalerPipeline>,
+    upscaler_failed: bool,
     width: u32,
     height: u32,
 }
@@ -173,6 +174,7 @@ impl GraphicsBackend for VulkanData {
             overlay_pipeline: None,
             overlay_cache: (0..image_count).map(|_| None).collect(),
             upscaler_pipeline: None,
+            upscaler_failed: false,
             width,
             height,
         };
@@ -215,7 +217,9 @@ impl GraphicsBackend for VulkanData {
     }
 
     fn supports_upscaler(&self) -> bool {
-        self.real_data.is_some()
+        self.real_data
+            .as_ref()
+            .is_some_and(|data| !data.upscaler_failed)
     }
 
     fn supports_ml_upscaler(&self) -> bool {
@@ -271,14 +275,16 @@ impl GraphicsBackend for VulkanData {
                 match created {
                     Ok(pipeline) => data.upscaler_pipeline = Some(pipeline),
                     Err(error) => {
-                        warn!("Failed to create upscaler pipeline ({error:?}); using copy path")
+                        warn!("Failed to create upscaler pipeline ({error:?}); using copy path");
+                        data.upscaler_failed = true;
                     }
                 }
             }
             if let Some(pipeline) = data.upscaler_pipeline.as_mut() {
                 let buf = data.bufs[2 * image_index + eye as usize];
+                let mut rendered = true;
                 Self::record_only_on(device, buf, || unsafe {
-                    pipeline.record(
+                    if let Err(error) = pipeline.record(
                         device,
                         buf,
                         image_index,
@@ -287,11 +293,21 @@ impl GraphicsBackend for VulkanData {
                         game_format,
                         game_layer,
                         params,
-                    );
+                    ) {
+                        warn!("Upscaler render setup failed ({error:?}); falling back");
+                        rendered = false;
+                    }
                 });
+                if rendered {
+                    return xr::Extent2Di {
+                        width: params.dst_width as _,
+                        height: params.dst_height as _,
+                    };
+                }
+                data.upscaler_failed = true;
                 return xr::Extent2Di {
-                    width: params.dst_width as _,
-                    height: params.dst_height as _,
+                    width: extent.width as _,
+                    height: extent.height as _,
                 };
             }
         }

@@ -344,6 +344,12 @@ pub fn maybe_reload() {
     }
 }
 
+/// The upscaler runs only on single-sample frames and only on backends that
+/// opted in. MSAA submissions take the existing copy/resolve path unchanged.
+pub fn upscaler_allowed(supports_upscaler: bool, sample_count: u32) -> bool {
+    supports_upscaler && sample_count == 1
+}
+
 pub fn snapshot() -> UpscalerConfig {
     maybe_reload();
     CONFIG
@@ -657,6 +663,27 @@ mod tests {
         };
         let p = c.params_for_size(2000, 1600, b).unwrap();
         assert_eq!((p.dst_width, p.dst_height), (1600, 1280));
+    }
+
+    #[test]
+    fn preserve_alpha_is_in_flags() {
+        let b = full_bounds();
+        let p = UpscalerConfig {
+            enabled: true,
+            preserve_alpha: true,
+            ..Default::default()
+        }
+        .params_for_size(100, 100, b)
+        .unwrap();
+        assert_eq!(p.flags() & FLAG_PRESERVE_ALPHA, FLAG_PRESERVE_ALPHA);
+    }
+
+    #[test]
+    fn upscaler_requires_single_sample() {
+        assert!(upscaler_allowed(true, 1));
+        assert!(!upscaler_allowed(true, 2));
+        assert!(!upscaler_allowed(true, 4));
+        assert!(!upscaler_allowed(false, 1));
     }
 
     #[test]

@@ -1070,6 +1070,9 @@ struct FrameController<G: GraphicsBackend> {
     /// Frame-locked params so both eyes always use identical weights and
     /// enhancement state; recomputed on the first eye of each frame.
     frame_upscaler_params: Option<crate::upscaler::UpscalerParams>,
+    /// Whether the current swapchain was sized for upscaled output. Used to
+    /// recreate it at input size when the upscaler falls back.
+    upscaler_sized: bool,
 }
 supported_backends_enum!(enum DynFrameController: FrameController);
 
@@ -1165,6 +1168,7 @@ impl<G: GraphicsBackend> FrameController<G> {
             eyes_submitted: Default::default(),
             submitting_null: false,
             frame_upscaler_params: None,
+            upscaler_sized: false,
         }
     }
 
@@ -1292,9 +1296,10 @@ impl<G: GraphicsBackend> FrameController<G> {
                     } else {
                         let upscaler_config = crate::upscaler::snapshot();
                         let computed = if upscaler_config.enabled
-                            && self.backend.supports_upscaler()
-                            && input_sample_count == 1
-                        {
+                            && crate::upscaler::upscaler_allowed(
+                                self.backend.supports_upscaler(),
+                                input_sample_count,
+                            ) {
                             let base = base_size.unwrap_or((input_width, input_height));
                             upscaler_config.params_for_size(base.0, base.1, bounds)
                         } else {
@@ -1307,7 +1312,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                         new_info.width = params.dst_width;
                         new_info.height = params.dst_height;
                     }
-                    let exact_size = upscaler_params.is_some();
+                    let exact_size = upscaler_params.is_some() || self.upscaler_sized;
 
                     if !self.swapchain_data.as_ref().is_some_and(|data| {
                         is_usable_swapchain(&data.info, data.initial_format, &new_info, exact_size)
@@ -1315,6 +1320,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                         info!("recreating swapchain (for {eye:?})");
                         self.recreate_swapchain(session_data, new_info);
                     }
+                    self.upscaler_sized = upscaler_params.is_some();
 
                     SubmittedEye {
                         extent: self.backend.copy_texture_to_swapchain(
