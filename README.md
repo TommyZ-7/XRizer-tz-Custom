@@ -194,6 +194,8 @@ Default off. The config lives at `~/.config/xrizer/upscaler.json` (override with
 
 `fsr` uses AMD FidelityFX Super Resolution 1 (EASU + RCAS), MIT-licensed; the AMD notice is preserved in `shaders/src/ffx_a.h` and `shaders/src/ffx_fsr1.h`. FSR expects an anti-aliased, post-tonemap input. `balanced` uses Snapdragon Game Super Resolution 1 (SGSR 1), BSD-3-Clause; the Qualcomm notice is preserved in `shaders/src/sgsr1.frag`. SGSR 1 is a full-frame 12-tap base filter, with only its adaptive sharpening scaled by the radial weight. XRizer does not copy TrueFovea code, shaders, constants, weights, or file formats.
 
+`ml` loads a neutral `XRU1` model (default `~/.config/xrizer/upscaler_model.xru`, override with `model_path`). The main model is a residual CNN: 3x3 base taps, three INT8 DP4A layers, 8/16/32 channels, and a clamped residual multiplied by the radial weight. The per-pixel MLP is the baseline. Missing/invalid models fall back to FSR.
+
 The ML presets need the opt-in Vulkan feature layer so a DXVK-created device exposes `shaderIntegerDotProduct` (DP4A) and, for the experiment, `VK_KHR_cooperative_matrix`. The layer only edits `vkCreateDevice`, fails open, and is never required for `fast`/`balanced`/`fsr`.
 
 ```sh

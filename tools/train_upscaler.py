@@ -305,15 +305,17 @@ def build_torch_model(args, torch):
             torch.nn.Hardtanh(-0.15, 0.15),
         )
     channels = args.channels or 16
+    # The inference shader extracts a 3x3 RGB patch (27 features, padded to
+    # 28) and applies three per-pixel INT8 layers. Keep the training topology
+    # identical so the exported layer table is faithful.
     layers = [
-        torch.nn.Conv2d(3, channels, 3, padding=1),
+        torch.nn.Linear(MLP_FEATURES, channels),
         torch.nn.Hardtanh(-1.0, 1.0),
-        torch.nn.Conv2d(channels, channels, 3, padding=1),
+        torch.nn.Linear(channels, channels),
         torch.nn.Hardtanh(-1.0, 1.0),
-        torch.nn.Conv2d(channels, 3, 3, padding=1),
+        torch.nn.Linear(channels, 3),
+        torch.nn.Hardtanh(-0.25, 0.25),
     ]
-    if args.model == "srpo":
-        layers.append(torch.nn.Hardtanh(-0.25, 0.25))
     return torch.nn.Sequential(*layers)
 
 
@@ -341,6 +343,29 @@ def export_mlp(model, output: Path, hidden: int) -> None:
     write_xru1(output, "mlp", MLP_FEATURES, hidden, 0, layers)
 
 
+def export_cnn(model, output: Path, channels: int) -> None:
+    torch = try_import_torch()
+    if torch is None:
+        raise SystemExit("torch is required to export a trained model")
+    layers = []
+    for linear in [m for m in model if isinstance(m, torch.nn.Linear)]:
+        weights = linear.weight.detach().cpu()
+        weights = fake_quant_i8(weights, 127.0).round().clamp(-127, 127).to(torch.int8)
+        biases = (linear.bias.detach().cpu() * 127.0).round().clamp(-(2**31), 2**31 - 1)
+        layers.append(
+            {
+                "input_count": int(weights.shape[1]),
+                "output_count": int(weights.shape[0]),
+                "weights": weights.flatten().tolist(),
+                "biases": biases.to(torch.int32).tolist(),
+                "weight_scale": 1.0 / 127.0,
+                "input_scale": 64.0,
+                "output_scale": 1.0,
+            }
+        )
+    write_xru1(output, "residual_cnn", MLP_FEATURES, channels, channels, layers)
+
+
 def train(args) -> None:
     torch = try_import_torch()
     if torch is None:
@@ -362,10 +387,11 @@ def train(args) -> None:
     output = Path(args.output)
     if args.model == "mlp":
         export_mlp(model, output, args.hidden)
+    elif args.model == "residual_cnn":
+        export_cnn(model, output, args.channels or 16)
     else:
         raise SystemExit(
-            "CNN/SRPO export uses the same XRU1 layer table; add the trained topology "
-            "when the inference shader for that model kind lands (Tasks 11/12)."
+            "SRPO export is added with the offset-prediction shader (Task 12)."
         )
     print(f"wrote {output}")
 

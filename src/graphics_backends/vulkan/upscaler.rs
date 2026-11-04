@@ -1,7 +1,7 @@
 //! Vulkan upscaler pipeline. Task 3 is a pass-through; later tasks add the
 //! fast/SGSR/FSR/ML variants behind the same interface.
 
-use crate::upscaler::model::Model;
+use crate::upscaler::model::{Model, ModelKind};
 use crate::upscaler::{UpscalerParams, UpscalerPreset};
 use ash::vk;
 use ash::vk::Handle;
@@ -729,7 +729,21 @@ impl MlResources {
         height: u32,
     ) -> Option<Self> {
         unsafe {
-            let packed = model.packed_mlp_weights()?;
+            let (packed, shader_bytes, hidden, output_scale) = match model.kind {
+                ModelKind::Mlp => (
+                    model.packed_mlp_weights()?,
+                    &include_bytes!(concat!(env!("OUT_DIR"), "/comp_mlp_dp4a.spv"))[..],
+                    model.layers.first()?.output_count,
+                    model.mlp_output_scale(),
+                ),
+                ModelKind::ResidualCnn => (
+                    model.packed_cnn_weights()?,
+                    &include_bytes!(concat!(env!("OUT_DIR"), "/comp_residual_cnn.spv"))[..],
+                    model.channels as u32,
+                    model.cnn_output_scale(),
+                ),
+                ModelKind::Offset => return None,
+            };
             let (image, memory) = create_image(
                 device,
                 instance,
@@ -852,12 +866,7 @@ impl MlResources {
                     None,
                 )
                 .ok()?;
-            let pipeline = create_compute_pipeline(
-                device,
-                layout,
-                &include_bytes!(concat!(env!("OUT_DIR"), "/comp_mlp_dp4a.spv"))[..],
-            )
-            .ok()?;
+            let pipeline = create_compute_pipeline(device, layout, shader_bytes).ok()?;
 
             for eye in 0..2 {
                 device.update_descriptor_sets(
@@ -931,9 +940,9 @@ impl MlResources {
                 weights_memory,
                 sampler,
                 weight_count: packed.len() as u32,
-                hidden: model.layers[0].output_count,
+                hidden,
                 input_scale: model.input_scale,
-                output_scale: model.mlp_output_scale(),
+                output_scale,
                 residual_clamp: model.residual_clamp,
                 scale: model.scale,
                 initialized: false,
