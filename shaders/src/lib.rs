@@ -19,6 +19,7 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
         ("fast.frag", "frag_fast.spv"),
         ("fsr_easu.frag", "frag_fsr_easu.spv"),
         ("enhance.frag", "frag_enhance.spv"),
+        ("sgsr1.frag", "frag_sgsr1.spv"),
     ];
 
     let cache_path = PathBuf::from(out_dir).join("shader_cache.json");

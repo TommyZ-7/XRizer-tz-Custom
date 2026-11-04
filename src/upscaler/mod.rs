@@ -233,6 +233,12 @@ impl UpscalerParams {
         params
     }
 
+    /// SGSR 1's 12-tap gather pattern assumes a non-flipped source. Flipped
+    /// submissions use the fast path, which maps bounds directly.
+    pub fn has_flipped_bounds(&self) -> bool {
+        self.src_bounds.uMin > self.src_bounds.uMax || self.src_bounds.vMin > self.src_bounds.vMax
+    }
+
     /// FSR 1 EASU constants for this output size and source extent.
     pub fn fsr_easu_con(&self, source_width: u32, source_height: u32) -> [u32; 16] {
         math::fsr_easu_con(
@@ -724,6 +730,38 @@ mod tests {
         assert_ne!(con[1], 0);
         assert_ne!(con[4], 0);
         assert_ne!(con[5], 0);
+    }
+
+    #[test]
+    fn balanced_preset_selects_sgsr_kind() {
+        let b = full_bounds();
+        let p = UpscalerConfig {
+            enabled: true,
+            preset: UpscalerPreset::Balanced,
+            ..Default::default()
+        }
+        .params_for_size(100, 100, b)
+        .unwrap();
+        assert_eq!(p.shader_kind(), 1);
+        assert!(!p.has_flipped_bounds());
+        assert_eq!(p.weight_at([0.5, 0.5]), 1.0);
+    }
+
+    #[test]
+    fn flipped_bounds_are_detected() {
+        let b = vr::VRTextureBounds_t {
+            uMin: 0.0,
+            vMin: 1.0,
+            uMax: 1.0,
+            vMax: 0.0,
+        };
+        let p = UpscalerConfig {
+            enabled: true,
+            ..Default::default()
+        }
+        .params_for_size(100, 100, b)
+        .unwrap();
+        assert!(p.has_flipped_bounds());
     }
 
     #[test]

@@ -27,6 +27,7 @@ pub struct UpscalerPipeline {
     fast_pipeline: vk::Pipeline,
     easu_pipeline: vk::Pipeline,
     rcas_pipeline: vk::Pipeline,
+    sgsr_pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
     render_pass: vk::RenderPass,
     easu_render_pass: vk::RenderPass,
@@ -200,6 +201,10 @@ impl UpscalerPipeline {
                 device,
                 &include_bytes!(concat!(env!("OUT_DIR"), "/frag_enhance.spv"))[..],
             )?;
+            let sgsr_module = create_shader_module(
+                device,
+                &include_bytes!(concat!(env!("OUT_DIR"), "/frag_sgsr1.spv"))[..],
+            )?;
             let passthrough_pipeline = create_graphics_pipeline(
                 device,
                 render_pass,
@@ -218,11 +223,14 @@ impl UpscalerPipeline {
             )?;
             let rcas_pipeline =
                 create_graphics_pipeline(device, render_pass, layout, vertex_module, rcas_module)?;
+            let sgsr_pipeline =
+                create_graphics_pipeline(device, render_pass, layout, vertex_module, sgsr_module)?;
             device.destroy_shader_module(vertex_module, None);
             device.destroy_shader_module(passthrough_module, None);
             device.destroy_shader_module(fast_module, None);
             device.destroy_shader_module(easu_module, None);
             device.destroy_shader_module(rcas_module, None);
+            device.destroy_shader_module(sgsr_module, None);
 
             let sampler = device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -293,6 +301,7 @@ impl UpscalerPipeline {
                 fast_pipeline,
                 easu_pipeline,
                 rcas_pipeline,
+                sgsr_pipeline,
                 layout,
                 render_pass,
                 easu_render_pass,
@@ -522,13 +531,11 @@ impl UpscalerPipeline {
                 device.cmd_draw(command_buffer, 3, 1, 0, 0);
                 device.cmd_end_render_pass(command_buffer);
             } else {
-                let pipeline = if matches!(
-                    params.preset,
-                    UpscalerPreset::Fast | UpscalerPreset::Balanced
-                ) {
-                    self.fast_pipeline
-                } else {
-                    self.passthrough_pipeline
+                let pipeline = match params.preset {
+                    UpscalerPreset::Fast => self.fast_pipeline,
+                    UpscalerPreset::Balanced if !params.has_flipped_bounds() => self.sgsr_pipeline,
+                    UpscalerPreset::Balanced => self.fast_pipeline,
+                    UpscalerPreset::Fsr | UpscalerPreset::Ml => self.passthrough_pipeline,
                 };
                 device.cmd_begin_render_pass(
                     command_buffer,
@@ -605,6 +612,7 @@ impl UpscalerPipeline {
             device.destroy_pipeline(self.fast_pipeline, None);
             device.destroy_pipeline(self.easu_pipeline, None);
             device.destroy_pipeline(self.rcas_pipeline, None);
+            device.destroy_pipeline(self.sgsr_pipeline, None);
             device.destroy_pipeline_layout(self.layout, None);
             device.destroy_descriptor_set_layout(self.set_layout, None);
             device.destroy_render_pass(self.render_pass, None);
