@@ -121,6 +121,17 @@ fn persist_brightness(clamped: f32) {
     }
 }
 
+/// Apply the supersampling/render scale to the runtime's base recommended
+/// per-eye size. The scale is clamped to the range accepted by
+/// `SetFloat("steamvr", "supersampleScale")`.
+pub(crate) fn apply_render_scale(base: (u32, u32), scale: f32) -> (u32, u32) {
+    let scale = scale.clamp(0.1, 4.0);
+    (
+        ((base.0 as f32 * scale).round() as u32).max(1),
+        ((base.1 as f32 * scale).round() as u32).max(1),
+    )
+}
+
 /// Reloaded + clamped 0.0..=1.0 brightness. 1.0 = normal, 0.0 = black.
 pub(crate) fn brightness_value() -> f32 {
     maybe_reload_brightness();
@@ -365,6 +376,14 @@ mod tests {
         let ck = CString::new(key).unwrap();
         let mut err = vr::EVRSettingsError::None;
         s.GetFloat(cs.as_ptr(), ck.as_ptr(), &mut err as *mut _)
+    }
+
+    #[test]
+    fn render_scale_rounds_and_clamps() {
+        assert_eq!(apply_render_scale((1000, 800), 0.7), (700, 560));
+        assert_eq!(apply_render_scale((1000, 800), 0.0), (100, 80));
+        assert_eq!(apply_render_scale((1000, 800), 10.0), (4000, 3200));
+        assert_eq!(apply_render_scale((1, 1), 0.1), (1, 1));
     }
 
     #[test]

@@ -196,35 +196,19 @@ impl System {
 
 impl vr::IVRSystem026_Interface for System {
     fn GetRecommendedRenderTargetSize(&self, width: *mut u32, height: *mut u32) {
-        let (base_width, base_height) = {
-            let mut cached = self.openxr.recommended_view_size.lock().unwrap();
-            *cached.get_or_insert_with(|| {
-                let views = self
-                    .openxr
-                    .instance
-                    .enumerate_view_configuration_views(
-                        self.openxr.system_id,
-                        xr::ViewConfigurationType::PRIMARY_STEREO,
-                    )
-                    .unwrap();
-                (
-                    views[0].recommended_image_rect_width,
-                    views[0].recommended_image_rect_height,
-                )
-            })
-        };
+        let base = self.openxr.base_recommended_view_size();
 
         // ponytail: global scale, per-app map if needed
         crate::settings::maybe_reload_scale();
         let scale = crate::settings::SUPERSAMPLE_SCALE.load(Ordering::Relaxed) as f32 / 100.0;
-        let scale = scale.clamp(0.1, 4.0);
+        let (scaled_width, scaled_height) = crate::settings::apply_render_scale(base, scale);
 
         if !width.is_null() {
-            unsafe { *width = ((base_width as f32 * scale) as u32).max(1) };
+            unsafe { *width = scaled_width };
         }
 
         if !height.is_null() {
-            unsafe { *height = ((base_height as f32 * scale) as u32).max(1) };
+            unsafe { *height = scaled_height };
         }
     }
     fn GetProjectionMatrix(&self, eye: vr::EVREye, near_z: f32, far_z: f32) -> vr::HmdMatrix44_t {
