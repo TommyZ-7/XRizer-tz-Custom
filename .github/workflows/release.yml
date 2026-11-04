@@ -24,7 +24,7 @@ jobs:
     env:
       SHA: ${{ inputs.sha || github.sha }}
     container:
-      image: 'ghcr.io/supreeeme/xrizer-ubuntu:latest'
+      image: 'ghcr.io/tommyz-7/xrizer-ubuntu:latest'
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
