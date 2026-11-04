@@ -32,67 +32,67 @@ impl ShutterActions {
         left_path: xr::Path,
         right_path: xr::Path,
         settings: &CaptureSettings,
-    ) -> Self {
+    ) -> Option<Self> {
         let set = instance
             .create_action_set("xrizer-capture-set", "XRizer capture shutter set", 0)
-            .unwrap();
+            .ok()?;
         let left_grip = set
             .create_action(
                 "capture-left-grip",
                 "Capture Left Grip",
                 &[left_path, right_path],
             )
-            .unwrap();
+            .ok()?;
         let right_grip = set
             .create_action(
                 "capture-right-grip",
                 "Capture Right Grip",
                 &[left_path, right_path],
             )
-            .unwrap();
+            .ok()?;
         let left_trigger = set
             .create_action(
                 "capture-left-trigger",
                 "Capture Left Trigger",
                 &[left_path, right_path],
             )
-            .unwrap();
+            .ok()?;
         let right_trigger = set
             .create_action(
                 "capture-right-trigger",
                 "Capture Right Trigger",
                 &[left_path, right_path],
             )
-            .unwrap();
+            .ok()?;
         let left_grip_click = set
             .create_action(
                 "capture-left-grip-click",
                 "Capture Left Grip Click",
                 &[left_path, right_path],
             )
-            .unwrap();
+            .ok()?;
         let right_grip_click = set
             .create_action(
                 "capture-right-grip-click",
                 "Capture Right Grip Click",
                 &[left_path, right_path],
             )
-            .unwrap();
+            .ok()?;
         let left_trigger_click = set
             .create_action(
                 "capture-left-trigger-click",
                 "Capture Left Trigger Click",
                 &[left_path, right_path],
             )
-            .unwrap();
+            .ok()?;
         let right_trigger_click = set
             .create_action(
                 "capture-right-trigger-click",
                 "Capture Right Trigger Click",
                 &[left_path, right_path],
             )
-            .unwrap();
-        Self {
+            .ok()?;
+        Some(Self {
             set,
             left_grip,
             right_grip,
@@ -104,7 +104,7 @@ impl ShutterActions {
             right_trigger_click,
             hold: settings.hold,
             lockout: settings.lockout,
-        }
+        })
     }
 
     /// Suggest `squeeze/value` and `trigger/value` bindings where the profile
@@ -188,7 +188,7 @@ mod tests {
         let xr = OpenXrData::<crate::compositor::Compositor>::new(&Injector::default()).unwrap();
         let left = xr.instance.string_to_path("/user/hand/left").unwrap();
         let right = xr.instance.string_to_path("/user/hand/right").unwrap();
-        let actions = ShutterActions::new(&xr.instance, left, right, &settings());
+        let actions = ShutterActions::new(&xr.instance, left, right, &settings()).unwrap();
         assert_eq!(actions.bindings::<OculusTouch>(&xr.instance).len(), 4);
         assert_eq!(actions.bindings::<Knuckles>(&xr.instance).len(), 6);
         assert_eq!(actions.bindings::<ViveWands>(&xr.instance).len(), 6);

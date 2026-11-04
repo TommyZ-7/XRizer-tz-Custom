@@ -114,13 +114,17 @@ impl<C: openxr_data::Compositor> Input<C> {
         } else {
             crate::capture::CaptureSettings::from_env()
                 .filter(|settings| settings.is_shutter())
-                .map(|settings| {
-                    ShutterActions::new(
+                .and_then(|settings| {
+                    let actions = ShutterActions::new(
                         &openxr.instance,
                         subaction_paths.left,
                         subaction_paths.right,
                         &settings,
-                    )
+                    );
+                    if actions.is_none() {
+                        log::warn!("capture shutter actions unavailable; shutter mode disabled");
+                    }
+                    actions
                 })
         };
         let pose_data = PoseData::new(
