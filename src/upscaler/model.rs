@@ -558,6 +558,41 @@ mod tests {
     }
 
     #[test]
+    fn parse_residual_cnn_and_offset_kinds() {
+        for kind in [ModelKind::ResidualCnn, ModelKind::Offset] {
+            let model = Model {
+                kind,
+                feature_count: 3,
+                hidden: 0,
+                channels: 16,
+                layers: vec![Layer {
+                    input_count: 3,
+                    output_count: 3,
+                    weight_scale: 1.0 / 127.0,
+                    input_scale: 1.0,
+                    output_scale: 1.0,
+                    weights: vec![1, -1, 2, -2, 3, -3, 4, -4, 5],
+                    biases: vec![0, 0, 0],
+                }],
+                input_scale: 1.0,
+                activation_scale: 1.0,
+                residual_clamp: 0.1,
+                scale: 1.0,
+            };
+            let parsed = Model::parse(&model.to_bytes()).unwrap();
+            assert_eq!(parsed.kind, kind);
+            assert_eq!(parsed.channels, 16);
+        }
+    }
+
+    #[test]
+    fn reject_invalid_residual_clamp() {
+        let mut bytes = Model::self_test_mlp(16).unwrap().to_bytes();
+        bytes[24..28].copy_from_slice(&2.0f32.to_le_bytes());
+        assert!(Model::parse(&bytes).is_err());
+    }
+
+    #[test]
     fn default_model_path_is_upscaler_model_xru() {
         let path = default_model_path();
         assert!(path.ends_with("upscaler_model.xru"));
