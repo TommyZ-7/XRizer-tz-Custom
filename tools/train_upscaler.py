@@ -366,6 +366,37 @@ def export_cnn(model, output: Path, channels: int) -> None:
     write_xru1(output, "residual_cnn", MLP_FEATURES, channels, channels, layers)
 
 
+def export_srpo(model, output: Path, channels: int) -> None:
+    torch = try_import_torch()
+    if torch is None:
+        raise SystemExit("torch is required to export a trained model")
+    layers = []
+    for linear in [m for m in model if isinstance(m, torch.nn.Linear)]:
+        weights = linear.weight.detach().cpu()
+        weights = fake_quant_i8(weights, 127.0).round().clamp(-127, 127).to(torch.int8)
+        biases = (linear.bias.detach().cpu() * 127.0).round().clamp(-(2**31), 2**31 - 1)
+        layers.append(
+            {
+                "input_count": int(weights.shape[1]),
+                "output_count": int(weights.shape[0]),
+                "weights": weights.flatten().tolist(),
+                "biases": biases.to(torch.int32).tolist(),
+                "weight_scale": 1.0 / 127.0,
+                "input_scale": 64.0,
+                "output_scale": 1.0,
+            }
+        )
+    write_xru1(
+        output,
+        "srpo",
+        MLP_FEATURES,
+        channels,
+        channels,
+        layers,
+        scale=1.5,
+    )
+
+
 def train(args) -> None:
     torch = try_import_torch()
     if torch is None:
@@ -390,9 +421,7 @@ def train(args) -> None:
     elif args.model == "residual_cnn":
         export_cnn(model, output, args.channels or 16)
     else:
-        raise SystemExit(
-            "SRPO export is added with the offset-prediction shader (Task 12)."
-        )
+        export_srpo(model, output, args.channels or 16)
     print(f"wrote {output}")
 
 

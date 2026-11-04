@@ -184,6 +184,14 @@ impl Model {
         })
     }
 
+    /// Deterministic SRPO-style offset predictor smoke model.
+    pub fn self_test_srpo(channels: u16) -> Result<Self, String> {
+        let mut model = Self::self_test_residual_cnn(channels)?;
+        model.kind = ModelKind::Offset;
+        model.scale = 1.5;
+        Ok(model)
+    }
+
     pub fn parse(bytes: &[u8]) -> Result<Self, String> {
         if bytes.len() < HEADER_SIZE {
             return Err("XRU1 header is truncated".to_string());
@@ -431,6 +439,18 @@ impl Model {
         Some(packed)
     }
 
+    pub fn packed_srpo_weights(&self) -> Option<Vec<u32>> {
+        if self.kind != ModelKind::Offset || self.layers.len() != 3 {
+            return None;
+        }
+        let mut packed = Vec::new();
+        for layer in &self.layers {
+            packed.extend(pack_layer(layer));
+            packed.extend(layer.biases.iter().map(|bias| *bias as u32));
+        }
+        Some(packed)
+    }
+
     /// Select the inference shader and packed weights for a model.
     pub fn packed_inference_weights(&self) -> Option<(Vec<u32>, ModelKind, u32, f32)> {
         match self.kind {
@@ -446,7 +466,12 @@ impl Model {
                 self.channels as u32,
                 self.cnn_output_scale(),
             )),
-            ModelKind::Offset => None,
+            ModelKind::Offset => Some((
+                self.packed_srpo_weights()?,
+                ModelKind::Offset,
+                self.channels as u32,
+                self.srpo_output_scale(),
+            )),
         }
     }
 
@@ -457,6 +482,11 @@ impl Model {
     }
 
     pub fn cnn_output_scale(&self) -> f32 {
+        let channels = self.channels.max(1) as f32;
+        1.0 / (127.0 * 127.0 * channels)
+    }
+
+    pub fn srpo_output_scale(&self) -> f32 {
         let channels = self.channels.max(1) as f32;
         1.0 / (127.0 * 127.0 * channels)
     }
@@ -724,6 +754,17 @@ mod tests {
             assert_eq!(kind, ModelKind::ResidualCnn);
             assert_eq!(hidden, channels as u32);
         }
+    }
+
+    #[test]
+    fn srpo_packing_and_offset_scale() {
+        let model = Model::self_test_srpo(16).unwrap();
+        assert_eq!(model.kind, ModelKind::Offset);
+        assert_eq!(model.scale, 1.5);
+        assert!(model.packed_srpo_weights().is_some());
+        let (_, kind, hidden, _) = model.packed_inference_weights().unwrap();
+        assert_eq!(kind, ModelKind::Offset);
+        assert_eq!(hidden, 16);
     }
 
     #[test]

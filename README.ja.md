@@ -125,7 +125,7 @@ vr::VRSettings()->SetFloat("xrizer", "brightness", 0.5f); // ファイルにも�
 
 `fsr` は AMD FidelityFX Super Resolution 1（EASU + RCAS、MIT）を使用し、AMD の著作権表示を `shaders/src/ffx_a.h` と `shaders/src/ffx_fsr1.h` に保持しています。FSR はアンチエイリアス済み・トーンマップ後の入力を前提とします。`balanced` は Snapdragon Game Super Resolution 1（SGSR 1、BSD-3-Clause）を使用し、Qualcomm の著作権表示を `shaders/src/sgsr1.frag` に保持しています。SGSR 1 は全面 12 タップの基礎フィルタで、適応シャープニングのみを半径方向の重みでスケールします。XRizer は TrueFovea のコード・シェーダ・定数・重み・ファイル形式をコピーしません。
 
-`ml` は中立な `XRU1` モデル（既定 `~/.config/xrizer/upscaler_model.xru`、`model_path` で上書き）を読み込みます。主モデルは 3x3 の基礎タップ＋3 層 INT8 DP4A（8/16/32 チャンネル）の残差 CNN で、クランプした残差に半径方向の重みを掛けます。ピクセル単位 MLP はベースラインです。モデルがない／不正な場合は FSR にフォールバックします。
+`ml` は中立な `XRU1` モデル（既定 `~/.config/xrizer/upscaler_model.xru`、`model_path` で上書き）を読み込みます。主モデルは 3x3 の基礎タップ＋3 層 INT8 DP4A（8/16/32 チャンネル）の残差 CNN で、クランプした残差に半径方向の重みを掛けます。ピクセル単位 MLP はベースラインです。実験的な SRPO 形式のオフセット予測は次段階で、最初の出荷 ML プリセットではありません。モデルがない／不正な場合は FSR にフォールバックします。
 
 ML プリセットには opt-in の Vulkan レイヤーが必要です。DXVK が作るデバイスに `shaderIntegerDotProduct`（DP4A）と、実験用の `VK_KHR_cooperative_matrix` を追加します。レイヤーは `vkCreateDevice` のみを編集し、失敗時は元の作成情報で続行します。`fast` / `balanced` / `fsr` には不要です。
 

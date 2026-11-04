@@ -742,7 +742,12 @@ impl MlResources {
                     model.channels as u32,
                     model.cnn_output_scale(),
                 ),
-                ModelKind::Offset => return None,
+                ModelKind::Offset => (
+                    model.packed_srpo_weights()?,
+                    &include_bytes!(concat!(env!("OUT_DIR"), "/comp_srpo.spv"))[..],
+                    model.channels as u32,
+                    model.srpo_output_scale(),
+                ),
             };
             let (image, memory) = create_image(
                 device,
