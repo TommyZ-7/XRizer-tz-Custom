@@ -42,7 +42,7 @@ fn main() {
         .args(&cargo_args)
         .stdout(Stdio::piped())
         .spawn()
-        .expect("Failed to call cargo");;
+        .expect("Failed to call cargo");
 
     let stdout = cmd.stdout.take().unwrap();
     let mut stdout = BufReader::new(stdout);

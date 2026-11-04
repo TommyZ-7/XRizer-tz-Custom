@@ -119,7 +119,31 @@ echo 1.0 > ~/.config/xrizer_brightness   # リセット
 vr::VRSettings()->SetFloat("xrizer", "brightness", 0.5f); // ファイルにも永続化
 ```
 
-## 3. パフォーマンス改善
+## 3. 実験的空間アップスケーラ（Vulkan）
+
+既定は無効。設定は `~/.config/xrizer/upscaler.json`（`XRIZER_UPSCALER_CONFIG` で上書き）に置き、500 ms ごとにホットリロードします。壊れた JSON の場合は直前の設定を維持します。プリセットは `fast` / `balanced` / `fsr` / `ml`。補正は連続的な重み場で制御します: `center`（UV）、全強度半径 `radius`、減衰幅 `feather`、`strength`。基礎リサンプルは常に画面全体に適用され、`radius: 2.0` で全面補正になります。
+
+ML プリセットには opt-in の Vulkan レイヤーが必要です。DXVK が作るデバイスに `shaderIntegerDotProduct`（DP4A）と、実験用の `VK_KHR_cooperative_matrix` を追加します。レイヤーは `vkCreateDevice` のみを編集し、失敗時は元の作成情報で続行します。`fast` / `balanced` / `fsr` には不要です。
+
+```sh
+# ビルドしてランタイム隣にレイヤーを配置
+cargo xbuild
+
+# ポータブル利用（loader 1.3.296+）
+XRIZER_UPSCALER_VK_LAYER=1 \
+VK_ADD_IMPLICIT_LAYER_PATH="$PWD/target/debug/vulkan/implicit_layer.d" %command%
+
+# ユーザーディレクトリへインストール（Steam Linux Runtime 推奨）
+scripts/install-vulkan-layer.sh --user
+# 削除: scripts/install-vulkan-layer.sh --remove
+
+# 強制オフ（有効化変数より優先）
+XRIZER_UPSCALER_VK_LAYER_DISABLE=1
+```
+
+`VK_LOADER_DEBUG=layer` で `VK_LAYER_XRIZER_upscaler` がロードされたか確認できます。レイヤーがない／無効／機能を追加できない場合は ML が FSR 1 にフォールバックし、ゲームは起動し続けます。
+
+## 4. パフォーマンス改善
 
 * 両目のコピーを 1 回の submit にまとめ、フレーム毎のオーバーヘッドを削減。
 * 輝度レイヤー処理のフレーム毎ヒープ確保を排除。

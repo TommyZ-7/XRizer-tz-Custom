@@ -5,7 +5,12 @@
 //! dispatch chain is kept in thread-safe maps keyed by the loader's handles so
 //! multiple instances and devices can coexist.
 
+mod chain;
+mod features;
+
 use ash::vk;
+use chain::rewrite_device_create_info;
+use features::{DeviceSupport, build_feature_plan};
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -35,25 +40,24 @@ struct LayerInstanceCreateInfo {
 }
 
 #[repr(C)]
-struct LayerDeviceLink {
-    p_next: *mut LayerDeviceLink,
-    pfn_next_get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
-    pfn_next_get_device_proc_addr: vk::PFN_vkGetDeviceProcAddr,
+pub(crate) struct LayerDeviceLink {
+    pub(crate) p_next: *mut LayerDeviceLink,
+    pub(crate) pfn_next_get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
+    pub(crate) pfn_next_get_device_proc_addr: vk::PFN_vkGetDeviceProcAddr,
 }
 
 #[repr(C)]
-struct LayerDeviceCreateInfo {
-    s_type: vk::StructureType,
-    p_next: *const c_void,
-    function: u32,
-    _padding: u32,
-    p_layer_info: *mut LayerDeviceLink,
+pub(crate) struct LayerDeviceCreateInfo {
+    pub(crate) s_type: vk::StructureType,
+    pub(crate) p_next: *const c_void,
+    pub(crate) function: u32,
+    pub(crate) _padding: u32,
+    pub(crate) p_layer_info: *mut LayerDeviceLink,
 }
 
 #[derive(Clone, Copy)]
 struct InstanceState {
     next_get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
-    next_get_device_proc_addr: Option<vk::PFN_vkGetDeviceProcAddr>,
 }
 
 #[derive(Clone, Copy)]
@@ -161,13 +165,10 @@ unsafe extern "system" fn create_instance(
         let result = next_create(create_info, allocator, instance);
         if result == vk::Result::SUCCESS {
             let created = *instance;
-            let next_gdpa = next_gipa(created, c"vkGetDeviceProcAddr".as_ptr())
-                .map(|function| std::mem::transmute(function));
             INSTANCES.lock().unwrap().insert(
                 raw(created),
                 InstanceState {
                     next_get_instance_proc_addr: next_gipa,
-                    next_get_device_proc_addr: next_gdpa,
                 },
             );
             LAST_INSTANCE.store(raw(created), Ordering::Relaxed);
@@ -184,8 +185,8 @@ unsafe extern "system" fn destroy_instance(
         let Some(state) = instance_state(instance) else {
             return;
         };
-        let Some(destroy) = (state
-            .next_get_instance_proc_addr)(instance, c"vkDestroyInstance".as_ptr())
+        let Some(destroy) =
+            (state.next_get_instance_proc_addr)(instance, c"vkDestroyInstance".as_ptr())
         else {
             return;
         };
@@ -209,8 +210,8 @@ unsafe extern "system" fn enumerate_physical_devices(
         let Some(state) = instance_state(instance) else {
             return vk::Result::ERROR_INITIALIZATION_FAILED;
         };
-        let Some(function) = (state
-            .next_get_instance_proc_addr)(instance, c"vkEnumeratePhysicalDevices".as_ptr())
+        let Some(function) =
+            (state.next_get_instance_proc_addr)(instance, c"vkEnumeratePhysicalDevices".as_ptr())
         else {
             return vk::Result::ERROR_INITIALIZATION_FAILED;
         };
@@ -223,6 +224,143 @@ unsafe extern "system" fn enumerate_physical_devices(
             }
         }
         result
+    }
+}
+
+type GetPhysicalDeviceFeatures2 =
+    unsafe extern "system" fn(vk::PhysicalDevice, *mut vk::PhysicalDeviceFeatures2<'static>);
+
+unsafe fn query_device_support(
+    instance: vk::Instance,
+    physical_device: vk::PhysicalDevice,
+    next_gipa: vk::PFN_vkGetInstanceProcAddr,
+) -> Option<DeviceSupport> {
+    unsafe {
+        let get_properties = next_gipa(instance, c"vkGetPhysicalDeviceProperties".as_ptr())?;
+        let get_properties: vk::PFN_vkGetPhysicalDeviceProperties =
+            std::mem::transmute(get_properties);
+        let mut properties = vk::PhysicalDeviceProperties::default();
+        get_properties(physical_device, &mut properties);
+        let api_version = properties.api_version;
+
+        let enumerate = next_gipa(instance, c"vkEnumerateDeviceExtensionProperties".as_ptr())?;
+        let enumerate: vk::PFN_vkEnumerateDeviceExtensionProperties =
+            std::mem::transmute(enumerate);
+        let mut extension_count = 0u32;
+        let mut extensions = Vec::new();
+        if enumerate(
+            physical_device,
+            std::ptr::null(),
+            &mut extension_count,
+            std::ptr::null_mut(),
+        ) == vk::Result::SUCCESS
+            && extension_count > 0
+        {
+            let mut extension_properties =
+                vec![vk::ExtensionProperties::default(); extension_count as usize];
+            if enumerate(
+                physical_device,
+                std::ptr::null(),
+                &mut extension_count,
+                extension_properties.as_mut_ptr(),
+            ) == vk::Result::SUCCESS
+            {
+                extensions = extension_properties[..extension_count as usize]
+                    .iter()
+                    .map(|property| CStr::from_ptr(property.extension_name.as_ptr()).to_owned())
+                    .collect();
+            }
+        }
+        let has_extension = |name: &CStr| {
+            extensions
+                .iter()
+                .any(|extension| extension.as_c_str() == name)
+        };
+
+        let get_features2 = next_gipa(instance, c"vkGetPhysicalDeviceFeatures2".as_ptr())
+            .or_else(|| next_gipa(instance, c"vkGetPhysicalDeviceFeatures2KHR".as_ptr()))?;
+        let get_features2: GetPhysicalDeviceFeatures2 = std::mem::transmute(get_features2);
+
+        let include_v13 = api_version >= vk::API_VERSION_1_3;
+        let include_v12 = api_version >= vk::API_VERSION_1_2;
+        let include_dot = !include_v13 && has_extension(features::EXT_SHADER_INTEGER_DOT_PRODUCT);
+        let include_coop = has_extension(features::EXT_COOPERATIVE_MATRIX);
+        let include_int8 = !include_v12 && has_extension(features::EXT_SHADER_FLOAT16_INT8);
+        let include_storage = !include_v12 && has_extension(features::EXT_8BIT_STORAGE);
+        let include_memory = !include_v12 && has_extension(features::EXT_VULKAN_MEMORY_MODEL);
+
+        let mut features2 = vk::PhysicalDeviceFeatures2::default();
+        let mut v13 = vk::PhysicalDeviceVulkan13Features::default();
+        let mut v12 = vk::PhysicalDeviceVulkan12Features::default();
+        let mut dot = vk::PhysicalDeviceShaderIntegerDotProductFeatures::default();
+        let mut coop = vk::PhysicalDeviceCooperativeMatrixFeaturesKHR::default();
+        let mut int8 = vk::PhysicalDeviceShaderFloat16Int8Features::default();
+        let mut storage = vk::PhysicalDevice8BitStorageFeatures::default();
+        let mut memory = vk::PhysicalDeviceVulkanMemoryModelFeatures::default();
+
+        let mut tail: *mut c_void = std::ptr::null_mut();
+        if include_memory {
+            memory.p_next = tail;
+            tail = &mut memory as *mut _ as *mut c_void;
+        }
+        if include_storage {
+            storage.p_next = tail;
+            tail = &mut storage as *mut _ as *mut c_void;
+        }
+        if include_int8 {
+            int8.p_next = tail;
+            tail = &mut int8 as *mut _ as *mut c_void;
+        }
+        if include_dot {
+            dot.p_next = tail;
+            tail = &mut dot as *mut _ as *mut c_void;
+        }
+        if include_coop {
+            coop.p_next = tail;
+            tail = &mut coop as *mut _ as *mut c_void;
+        }
+        if include_v12 {
+            v12.p_next = tail;
+            tail = &mut v12 as *mut _ as *mut c_void;
+        }
+        if include_v13 {
+            v13.p_next = tail;
+            tail = &mut v13 as *mut _ as *mut c_void;
+        }
+        features2.p_next = tail;
+        get_features2(physical_device, &mut features2);
+
+        let shader_integer_dot_product = if include_dot {
+            dot.shader_integer_dot_product == vk::TRUE
+        } else {
+            v13.shader_integer_dot_product == vk::TRUE
+        };
+        let shader_int8 = if include_v12 {
+            v12.shader_int8 == vk::TRUE
+        } else {
+            int8.shader_int8 == vk::TRUE
+        };
+        let storage_buffer8_bit_access = if include_v12 {
+            v12.storage_buffer8_bit_access == vk::TRUE
+        } else {
+            storage.storage_buffer8_bit_access == vk::TRUE
+        };
+        let vulkan_memory_model = if include_v12 {
+            v12.vulkan_memory_model == vk::TRUE
+        } else {
+            memory.vulkan_memory_model == vk::TRUE
+        };
+        let cooperative_matrix = include_coop && coop.cooperative_matrix == vk::TRUE;
+
+        Some(DeviceSupport {
+            api_version,
+            shader_integer_dot_product,
+            cooperative_matrix,
+            shader_int8,
+            storage_buffer8_bit_access,
+            vulkan_memory_model,
+            extensions,
+        })
     }
 }
 
@@ -250,16 +388,54 @@ unsafe extern "system" fn create_device(
             .copied()
             .map(|value| <vk::Instance as vk::Handle>::from_raw(value as u64))
             .unwrap_or_else(|| {
-                <vk::Instance as vk::Handle>::from_raw(
-                    LAST_INSTANCE.load(Ordering::Relaxed) as u64
-                )
+                <vk::Instance as vk::Handle>::from_raw(LAST_INSTANCE.load(Ordering::Relaxed) as u64)
             });
 
         let Some(next_create) = next_gipa(instance, c"vkCreateDevice".as_ptr()) else {
             return vk::Result::ERROR_INITIALIZATION_FAILED;
         };
         let next_create: vk::PFN_vkCreateDevice = std::mem::transmute(next_create);
-        let result = next_create(physical_device, create_info, allocator, device);
+
+        let rewritten = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let support = query_device_support(instance, physical_device, next_gipa)?;
+            let plan = build_feature_plan(&support);
+            if plan.is_empty() {
+                return None;
+            }
+            log::info!(
+                "XRizer upscaler layer enabling {:?} (device API {}.{})",
+                plan,
+                vk::api_version_major(support.api_version),
+                vk::api_version_minor(support.api_version),
+            );
+            if std::env::var_os("XRIZER_UPSCALER_VK_LAYER_DEBUG").is_some() {
+                eprintln!(
+                    "XRizer layer plan: {:?} (device API {}.{})",
+                    plan,
+                    vk::api_version_major(support.api_version),
+                    vk::api_version_minor(support.api_version),
+                );
+            }
+            rewrite_device_create_info(&plan, &*create_info)
+        }))
+        .unwrap_or_else(|_| {
+            log::warn!("XRizer upscaler layer panicked while rewriting device creation; fail-open");
+            None
+        });
+
+        let result = if let Some(owned) = rewritten.as_ref() {
+            next_create(physical_device, owned.as_raw(), allocator, device)
+        } else {
+            next_create(physical_device, create_info, allocator, device)
+        };
+        let result = if rewritten.is_some() && result != vk::Result::SUCCESS {
+            log::warn!(
+                "XRizer upscaler layer device creation failed ({result:?}); retrying original"
+            );
+            next_create(physical_device, create_info, allocator, device)
+        } else {
+            result
+        };
         if result == vk::Result::SUCCESS {
             DEVICES.lock().unwrap().insert(
                 raw(*device),
@@ -281,8 +457,7 @@ unsafe extern "system" fn destroy_device(
         let Some(state) = device_state(device) else {
             return;
         };
-        let Some(destroy) = (state
-            .next_get_device_proc_addr)(device, c"vkDestroyDevice".as_ptr())
+        let Some(destroy) = (state.next_get_device_proc_addr)(device, c"vkDestroyDevice".as_ptr())
         else {
             return;
         };
@@ -292,6 +467,10 @@ unsafe extern "system" fn destroy_device(
     }
 }
 
+/// # Safety
+///
+/// `name` must be a valid NUL-terminated string, and `instance` must be a
+/// loader-provided instance handle or `VK_NULL_HANDLE`.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn xrizer_layer_GetInstanceProcAddr(
     instance: vk::Instance,
@@ -302,10 +481,17 @@ pub unsafe extern "system" fn xrizer_layer_GetInstanceProcAddr(
     }
     let name = unsafe { CStr::from_ptr(name) }.to_bytes();
     match name {
-        b"vkGetInstanceProcAddr" => unsafe { void_fn::<vk::PFN_vkGetInstanceProcAddr>(xrizer_layer_GetInstanceProcAddr) },
+        b"vkGetInstanceProcAddr" => unsafe {
+            void_fn::<vk::PFN_vkGetInstanceProcAddr>(xrizer_layer_GetInstanceProcAddr)
+        },
         b"vkCreateInstance" => unsafe { void_fn::<vk::PFN_vkCreateInstance>(create_instance) },
+        b"vkGetDeviceProcAddr" => unsafe {
+            void_fn::<vk::PFN_vkGetDeviceProcAddr>(xrizer_layer_GetDeviceProcAddr)
+        },
         b"vkDestroyInstance" => unsafe { void_fn::<vk::PFN_vkDestroyInstance>(destroy_instance) },
-        b"vkEnumeratePhysicalDevices" => unsafe { void_fn::<vk::PFN_vkEnumeratePhysicalDevices>(enumerate_physical_devices) },
+        b"vkEnumeratePhysicalDevices" => unsafe {
+            void_fn::<vk::PFN_vkEnumeratePhysicalDevices>(enumerate_physical_devices)
+        },
         b"vkCreateDevice" => unsafe { void_fn::<vk::PFN_vkCreateDevice>(create_device) },
         b"vkDestroyDevice" => unsafe { void_fn::<vk::PFN_vkDestroyDevice>(destroy_device) },
         _ => {
@@ -318,6 +504,10 @@ pub unsafe extern "system" fn xrizer_layer_GetInstanceProcAddr(
     }
 }
 
+/// # Safety
+///
+/// `name` must be a valid NUL-terminated string, and `device` must be a
+/// loader-provided device handle.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn xrizer_layer_GetDeviceProcAddr(
     device: vk::Device,
@@ -328,7 +518,9 @@ pub unsafe extern "system" fn xrizer_layer_GetDeviceProcAddr(
     }
     let name = unsafe { CStr::from_ptr(name) }.to_bytes();
     match name {
-        b"vkGetDeviceProcAddr" => unsafe { void_fn::<vk::PFN_vkGetDeviceProcAddr>(xrizer_layer_GetDeviceProcAddr) },
+        b"vkGetDeviceProcAddr" => unsafe {
+            void_fn::<vk::PFN_vkGetDeviceProcAddr>(xrizer_layer_GetDeviceProcAddr)
+        },
         b"vkDestroyDevice" => unsafe { void_fn::<vk::PFN_vkDestroyDevice>(destroy_device) },
         _ => {
             let state = unsafe { device_state(device) }?;
@@ -347,6 +539,10 @@ pub struct VkNegotiateLayerInterface {
     pfn_get_physical_device_proc_addr: Option<NextGetPhysicalDeviceProcAddr>,
 }
 
+/// # Safety
+///
+/// `interface` must point to a writable `VkNegotiateLayerInterface` supplied by
+/// the Vulkan loader.
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn vkNegotiateLoaderLayerInterfaceVersion(
     interface: *mut VkNegotiateLayerInterface,

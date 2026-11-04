@@ -20,13 +20,7 @@ pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
 }
 
 /// Continuous radial weight in aspect-corrected UV space.
-pub fn weight_at(
-    uv: [f32; 2],
-    center: [f32; 2],
-    radius: f32,
-    feather: f32,
-    aspect: f32,
-) -> f32 {
+pub fn weight_at(uv: [f32; 2], center: [f32; 2], radius: f32, feather: f32, aspect: f32) -> f32 {
     let dx = (uv[0] - center[0]) * aspect;
     let dy = uv[1] - center[1];
     let distance = (dx * dx + dy * dy).sqrt();
@@ -63,12 +57,7 @@ pub fn residual_clamp(residual: f32, limit: f32) -> f32 {
 
 /// Clamp a residual to a fraction of the local luma range. Flat areas allow
 /// no residual at all, which keeps gradients and UI backgrounds stable.
-pub fn local_residual_clamp(
-    residual: f32,
-    local_min: f32,
-    local_max: f32,
-    fraction: f32,
-) -> f32 {
+pub fn local_residual_clamp(residual: f32, local_min: f32, local_max: f32, fraction: f32) -> f32 {
     let range = (local_max - local_min).abs();
     residual_clamp(residual, range * fraction.abs())
 }
@@ -173,13 +162,13 @@ mod tests {
             let d = step as f32 / 100.0;
             let w = weight_at([0.5 + d, 0.5], center, radius, feather, aspect);
             assert!((0.0..=1.0).contains(&w));
-            assert!(w <= previous + 1e-6, "weight must not increase with distance");
+            assert!(
+                w <= previous + 1e-6,
+                "weight must not increase with distance"
+            );
             previous = w;
         }
-        assert_eq!(
-            weight_at([0.9, 0.5], center, radius, feather, aspect),
-            0.0
-        );
+        assert_eq!(weight_at([0.9, 0.5], center, radius, feather, aspect), 0.0);
     }
 
     #[test]

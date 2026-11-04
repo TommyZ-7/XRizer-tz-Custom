@@ -96,8 +96,7 @@ impl UpscalerConfig {
             radius: sanitize_finite(self.radius, default.radius).clamp(0.05, 2.0),
             feather: sanitize_finite(self.feather, default.feather).clamp(0.0, 1.0),
             strength: sanitize_finite(self.strength, default.strength).clamp(0.0, 3.0),
-            output_scale: sanitize_finite(self.output_scale, default.output_scale)
-                .clamp(0.5, 2.0),
+            output_scale: sanitize_finite(self.output_scale, default.output_scale).clamp(0.5, 2.0),
             ..self
         }
     }
@@ -203,13 +202,7 @@ impl UpscalerParams {
             return 0.0;
         }
         let aspect = self.dst_width as f32 / self.dst_height as f32;
-        math::weight_at(
-            uv,
-            self.center,
-            self.radius,
-            self.feather,
-            aspect,
-        )
+        math::weight_at(uv, self.center, self.radius, self.feather, aspect)
     }
 
     pub fn shader_kind(&self) -> u32 {
@@ -267,13 +260,16 @@ static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 pub fn test_lock() -> std::sync::MutexGuard<'static, ()> {
-    TEST_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
 pub fn reset_for_test() {
-    *CONFIG.write().unwrap_or_else(|poisoned| poisoned.into_inner()) =
-        UpscalerConfig::default();
+    *CONFIG
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = UpscalerConfig::default();
     LAST_POLL_MS.store(0, Ordering::Relaxed);
 }
 
@@ -328,7 +324,9 @@ pub fn maybe_reload() {
         }
         match load_from_path(&path) {
             Ok(config) => {
-                *CONFIG.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = config;
+                *CONFIG
+                    .write()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = config;
             }
             Err(error) => {
                 log::warn!("{error}; keeping previous upscaler config");

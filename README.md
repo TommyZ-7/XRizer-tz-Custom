@@ -188,6 +188,30 @@ echo 1.0 > ~/.config/xrizer_brightness   # reset
 vr::VRSettings()->SetFloat("xrizer", "brightness", 0.5f); // also persisted to file
 ```
 
+## Experimental Spatial Upscaler (Vulkan) — This Fork Only
+
+Default off. The config lives at `~/.config/xrizer/upscaler.json` (override with `XRIZER_UPSCALER_CONFIG`); it is hot-reloaded every 500 ms and a broken file keeps the last good settings. Presets are `fast`, `balanced`, `fsr`, and `ml`. Enhancement is controlled by a continuous field: `center` (UV), full-weight `radius`, falloff `feather`, and `strength`. The base resample always covers the whole frame; `radius: 2.0` means full-frame enhancement.
+
+The ML presets need the opt-in Vulkan feature layer so a DXVK-created device exposes `shaderIntegerDotProduct` (DP4A) and, for the experiment, `VK_KHR_cooperative_matrix`. The layer only edits `vkCreateDevice`, fails open, and is never required for `fast`/`balanced`/`fsr`.
+
+```sh
+# Build and stage the layer next to the runtime
+cargo xbuild
+
+# Portable use (loader 1.3.296+)
+XRIZER_UPSCALER_VK_LAYER=1 \
+VK_ADD_IMPLICIT_LAYER_PATH="$PWD/target/debug/vulkan/implicit_layer.d" %command%
+
+# Or install into the user data dir (recommended for Steam Linux Runtime)
+scripts/install-vulkan-layer.sh --user
+# remove with: scripts/install-vulkan-layer.sh --remove
+
+# Mandatory off-switch, even when the enable variable is set
+XRIZER_UPSCALER_VK_LAYER_DISABLE=1
+```
+
+`VK_LOADER_DEBUG=layer` shows whether `VK_LAYER_XRIZER_upscaler` was loaded. If the layer is absent, disabled, or declines a feature, ML falls back to FSR 1; the game must still start.
+
 The version xrizer reports comes from `git describe`, via the default `git-version` feature. Builds that don't have a git checkout - distribution packages and other builds from a source tarball - can disable that feature with `--no-default-features` (re-enabling the other default features they want, e.g. `--features monado`) and set `XRIZER_VERSION` at build time instead. `XRIZER_VERSION` takes precedence over `git describe` whenever it is set.
 
 # Contributing
