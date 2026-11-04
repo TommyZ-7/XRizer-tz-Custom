@@ -181,12 +181,15 @@ Task 14 の学習データ用に、ゲームが提出した眼テクスチャ（
 ```sh
 XRIZER_CAPTURE=1 \
 XRIZER_CAPTURE_DIR="$HOME/xrizer-captures/VRChat/scene-a" \
+XRIZER_CAPTURE_MODE=interval \
 XRIZER_CAPTURE_INTERVAL_MS=500 \
 XRIZER_CAPTURE_MAX_PAIRS=300 \
   %command%
 ```
 
-`frame_000001_left.png` / `frame_000001_right.png` と `metadata.json`（解像度、フォーマット、色空間、bounds、`render_scale`、プリセット、眼ごとの情報）を保存します。`XRIZER_CAPTURE_MAX_PAIRS`（既定 300 ペア）で自動停止し、VR 内ホットキーはありません。`XRIZER_CAPTURE=0` で無効化できます。詳細は `tools/upscaler_dataset.md`。PNG エンコードは提出スレッド外で行い、提出側は別コマンドバッファの記録と fence ポーリングのみです。MSAA はスキップし、HDR/10bit は 8bit にクリップされます。
+コントローラで撮影する場合は `XRIZER_CAPTURE_MODE=shutter` を指定し、**両手のグリップ＋トリガーを同時に 250ms 保持**します。1 回の押下で 1 ペア、1 秒のロックアウト付きです（`XRIZER_CAPTURE_HOLD_MS` / `XRIZER_CAPTURE_LOCKOUT_MS`）。入力は XRizer の OpenXR アクション経由で読むだけで消費しないため、ゲーム側にもそのまま伝わります。シャッター検出はゲームのアクション同期（VRChat や多くの action-manifest タイトル）に相乗りします。interval モードは入力に依存しません。
+
+`frame_000001_left.png` / `frame_000001_right.png` と `metadata.json`（解像度、フォーマット、色空間、bounds、`render_scale`、プリセット、眼ごとの情報）を保存します。`XRIZER_CAPTURE_MAX_PAIRS`（既定 300 ペア）で自動停止し、VR 内ホットキーはありません。`XRIZER_CAPTURE=0` で無効化できます。shutter モードで撮影に成功すると、フレーム番号と保存先を含む freedesktop 通知（D-Bus）をベストエフォートで送ります。通知サーバがない場合でも撮影・ゲームは継続します。詳細は `tools/upscaler_dataset.md`。PNG エンコードは提出スレッド外で行い、提出側は別コマンドバッファの記録と fence ポーリングのみです。MSAA はスキップし、HDR/10bit は 8bit にクリップされます。
 
 ## 4. パフォーマンス改善
 

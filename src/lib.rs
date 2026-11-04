@@ -1,6 +1,7 @@
 #![deny(clippy::all)]
 
 mod applications;
+mod capture;
 mod chaperone;
 mod clientcore;
 mod compositor;

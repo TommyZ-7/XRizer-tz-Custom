@@ -158,7 +158,7 @@ impl<C: openxr_data::Compositor> Input<C> {
             ..
         } = binding_context;
 
-        let xr_sets: Vec<_> = sets
+        let mut xr_sets: Vec<_> = sets
             .values()
             .chain([
                 &session_data.input_data.pose_data.get().unwrap().set,
@@ -167,6 +167,9 @@ impl<C: openxr_data::Compositor> Input<C> {
                 &skeletal_input.set,
             ])
             .collect();
+        if let Some(shutter) = &self.shutter {
+            xr_sets.push(&shutter.set);
+        }
         session_data.session.attach_action_sets(&xr_sets).unwrap();
 
         // Try forcing an interaction profile now
@@ -418,6 +421,12 @@ impl<C: openxr_data::Compositor> Input<C> {
                     .map(|path| xr::Binding::new(context.haptic_action, path)),
             )
             .chain(skeletal_bindings.binding_iter(&context.skeletal_input.actions))
+            .chain(
+                self.shutter
+                    .as_ref()
+                    .map(|shutter| shutter.bindings::<P>(&self.openxr.instance))
+                    .unwrap_or_default(),
+            )
             .collect();
 
         self.openxr

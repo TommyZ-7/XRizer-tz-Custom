@@ -6,6 +6,7 @@
 //! lossless PNGs plus metadata. The submit path only records a separate command
 //! buffer and never waits for the PNG encoder.
 
+use crate::capture::{CaptureMode, CaptureSettings};
 use ash::vk;
 use ash::vk::Handle;
 use log::{info, warn};
@@ -18,56 +19,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-
-#[derive(Debug, Clone)]
-pub struct CaptureConfig {
-    pub dir: PathBuf,
-    pub interval: Duration,
-    pub max_pairs: u32,
-    pub scene: String,
-}
-
-impl CaptureConfig {
-    pub fn from_env() -> Option<Self> {
-        let explicit = std::env::var("XRIZER_CAPTURE").ok();
-        let dir = std::env::var_os("XRIZER_CAPTURE_DIR");
-        let enabled = match explicit.as_deref() {
-            Some("0" | "false" | "no" | "off") => false,
-            Some(_) => true,
-            None => dir.is_some(),
-        };
-        if !enabled {
-            return None;
-        }
-        let Some(dir) = dir else {
-            warn!("XRIZER_CAPTURE is enabled but XRIZER_CAPTURE_DIR is not set");
-            return None;
-        };
-        if dir.is_empty() {
-            warn!("XRIZER_CAPTURE_DIR is empty; capture disabled");
-            return None;
-        }
-        let interval_ms = std::env::var("XRIZER_CAPTURE_INTERVAL_MS")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(500)
-            .clamp(100, 60_000);
-        let max_pairs = std::env::var("XRIZER_CAPTURE_MAX_PAIRS")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(300)
-            .clamp(1, 100_000);
-        let scene =
-            std::env::var("XRIZER_CAPTURE_SCENE").unwrap_or_else(|_| "unspecified".to_string());
-        Some(Self {
-            dir: PathBuf::from(dir),
-            interval: Duration::from_millis(interval_ms),
-            max_pairs,
-            scene,
-        })
-    }
-}
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone, Copy)]
 pub struct CaptureSource {
@@ -96,6 +48,8 @@ struct CaptureMetadata {
     render_scale: f32,
     output_scale: f32,
     preset: String,
+    #[serde(default = "default_mode")]
+    mode: String,
     #[serde(default)]
     frames: Vec<FrameMeta>,
 }
@@ -110,6 +64,10 @@ fn default_color_space() -> String {
 
 fn default_eye() -> String {
     "both".to_string()
+}
+
+fn default_mode() -> String {
+    "interval".to_string()
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -134,6 +92,7 @@ struct EyeMeta {
 }
 
 struct CaptureJob {
+    notify: bool,
     left: Vec<u8>,
     right: Vec<u8>,
     left_path: PathBuf,
@@ -171,6 +130,8 @@ impl CaptureWriter {
                         warn!("capture PNG write failed: {error}");
                         continue;
                     }
+                    let index = job.frame.index;
+                    let notify = job.notify;
                     {
                         let mut metadata = worker_metadata
                             .lock()
@@ -179,6 +140,8 @@ impl CaptureWriter {
                     }
                     if let Err(error) = write_metadata(&worker_dir, &worker_metadata) {
                         warn!("capture metadata write failed: {error}");
+                    } else if notify {
+                        crate::capture::notify_capture(index, &worker_dir);
                     }
                 }
             })
@@ -246,7 +209,7 @@ struct CaptureFlight {
 }
 
 pub struct CaptureState {
-    config: CaptureConfig,
+    config: CaptureSettings,
     writer: CaptureWriter,
     pipeline: Option<CapturePipeline>,
     pipeline_key: Option<(vk::Format, u32, u32)>,
@@ -264,7 +227,7 @@ pub struct CaptureState {
 
 impl CaptureState {
     pub fn new(
-        config: CaptureConfig,
+        config: CaptureSettings,
         device: &ash::Device,
         queue_family_index: u32,
     ) -> Result<Self, String> {
@@ -294,6 +257,7 @@ impl CaptureState {
             render_scale: crate::settings::current_supersample_scale(),
             output_scale: crate::upscaler::snapshot().output_scale,
             preset: format!("{:?}", crate::upscaler::snapshot().preset).to_lowercase(),
+            mode: format!("{:?}", config.mode).to_lowercase(),
             frames: Vec::new(),
         });
         let metadata = Arc::new(Mutex::new(metadata));
@@ -316,9 +280,11 @@ impl CaptureState {
             )
         }
         .map_err(|error| format!("capture command buffer failed: {error:?}"))?[0];
+        crate::capture::clear_shutter_request();
         info!(
-            "training capture enabled: dir={} interval_ms={} max_pairs={} next_index={next_index}",
+            "training capture enabled: dir={} mode={:?} interval_ms={} max_pairs={} next_index={next_index}",
             config.dir.display(),
+            config.mode,
             config.interval.as_millis(),
             config.max_pairs
         );
@@ -341,7 +307,11 @@ impl CaptureState {
     }
 
     pub fn note_eye(&mut self, eye: usize, source: CaptureSource, now: Instant) {
-        if self.stopped || self.flight.is_some() {
+        if self.stopped {
+            crate::capture::clear_shutter_request();
+            return;
+        }
+        if self.flight.is_some() {
             return;
         }
         if source.sample_count != 1 {
@@ -351,7 +321,12 @@ impl CaptureState {
         if source.width == 0 || source.height == 0 {
             return;
         }
-        if !self.pending && now >= self.next_due {
+        if self.config.mode == CaptureMode::Shutter {
+            if crate::capture::shutter_requested() && !self.pending && self.flight.is_none() {
+                self.pending = true;
+                self.sources = [None; 2];
+            }
+        } else if !self.pending && now >= self.next_due && self.flight.is_none() {
             self.pending = true;
             self.sources = [None; 2];
         }
@@ -509,6 +484,9 @@ impl CaptureState {
             .unwrap_or(0.0);
         self.last_capture = now;
         self.next_due = now + self.config.interval;
+        if self.config.mode == CaptureMode::Shutter {
+            crate::capture::clear_shutter_request();
+        }
         self.flight = Some(CaptureFlight {
             fence,
             buffers: [left_buffer, right_buffer],
@@ -566,6 +544,7 @@ impl CaptureState {
         let height = flight.sources[0].height;
         let [left, right] = readbacks;
         let job = CaptureJob {
+            notify: self.config.mode == CaptureMode::Shutter,
             left,
             right,
             left_path: self.config.dir.join(&left_file),
@@ -580,6 +559,7 @@ impl CaptureState {
         self.saved_pairs = self.saved_pairs.saturating_add(1);
         if self.saved_pairs >= self.config.max_pairs {
             self.stopped = true;
+            crate::capture::clear_shutter_request();
             info!(
                 "training capture stopped after {} pairs (max_pairs={})",
                 self.saved_pairs, self.config.max_pairs
@@ -589,6 +569,7 @@ impl CaptureState {
 
     pub fn destroy(&mut self, device: &ash::Device) {
         self.stopped = true;
+        crate::capture::clear_shutter_request();
         if let Some(flight) = self.flight.take() {
             unsafe {
                 let _ = device.wait_for_fences(&[flight.fence], true, u64::MAX);
@@ -1192,56 +1173,6 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn disabled_without_opt_in() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::remove_var("XRIZER_CAPTURE");
-            std::env::remove_var("XRIZER_CAPTURE_DIR");
-        }
-        assert!(CaptureConfig::from_env().is_none());
-    }
-
-    #[test]
-    fn parses_opt_in_and_clamps() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join("xrizer_capture_config_test");
-        unsafe {
-            std::env::set_var("XRIZER_CAPTURE", "1");
-            std::env::set_var("XRIZER_CAPTURE_DIR", &dir);
-            std::env::set_var("XRIZER_CAPTURE_INTERVAL_MS", "1");
-            std::env::set_var("XRIZER_CAPTURE_MAX_PAIRS", "999999");
-            std::env::set_var("XRIZER_CAPTURE_SCENE", "test-scene");
-        }
-        let config = CaptureConfig::from_env().unwrap();
-        assert_eq!(config.dir, dir);
-        assert_eq!(config.interval, Duration::from_millis(100));
-        assert_eq!(config.max_pairs, 100_000);
-        assert_eq!(config.scene, "test-scene");
-        unsafe {
-            std::env::remove_var("XRIZER_CAPTURE");
-            std::env::remove_var("XRIZER_CAPTURE_DIR");
-            std::env::remove_var("XRIZER_CAPTURE_INTERVAL_MS");
-            std::env::remove_var("XRIZER_CAPTURE_MAX_PAIRS");
-            std::env::remove_var("XRIZER_CAPTURE_SCENE");
-        }
-    }
-
-    #[test]
-    fn explicit_zero_disables_capture() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join("xrizer_capture_zero_test");
-        unsafe {
-            std::env::set_var("XRIZER_CAPTURE", "0");
-            std::env::set_var("XRIZER_CAPTURE_DIR", &dir);
-        }
-        assert!(CaptureConfig::from_env().is_none());
-        unsafe {
-            std::env::remove_var("XRIZER_CAPTURE");
-            std::env::remove_var("XRIZER_CAPTURE_DIR");
-        }
-    }
-
-    #[test]
     fn scan_next_index_skips_existing_pairs() {
         let dir =
             std::env::temp_dir().join(format!("xrizer_capture_scan_test_{}", std::process::id()));
@@ -1312,6 +1243,7 @@ mod tests {
             render_scale: 1.0,
             output_scale: 1.0,
             preset: "fast".into(),
+            mode: "interval".into(),
             frames: Vec::new(),
         }));
         let writer = CaptureWriter::new(dir.clone(), metadata.clone()).unwrap();
@@ -1340,6 +1272,7 @@ mod tests {
             },
         };
         writer.send(CaptureJob {
+            notify: false,
             left: vec![255, 0, 0, 255],
             right: vec![0, 255, 0, 255],
             left_path: dir.join("frame_000001_left.png"),

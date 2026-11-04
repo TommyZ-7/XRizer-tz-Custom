@@ -3,6 +3,7 @@ mod custom_bindings;
 mod devices;
 mod legacy;
 mod profiles;
+mod shutter;
 mod skeletal;
 
 #[cfg(test)]
@@ -12,6 +13,7 @@ pub use devices::TrackedDeviceType;
 pub use profiles::InteractionProfile;
 
 use devices::{SubactionPaths, TrackedDevice, TrackedDeviceList};
+use shutter::ShutterActions;
 use skeletal::FingerState;
 use skeletal::SkeletalInputActionData;
 
@@ -37,6 +39,7 @@ use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock, RwLock, RwLockReadGuard};
+use std::time::Instant;
 
 new_key_type! {
     struct InputSourceKey;
@@ -62,6 +65,8 @@ pub struct Input<C: openxr_data::Compositor> {
     subaction_paths: SubactionPaths,
     events: Mutex<VecDeque<InputEvent>>,
     loading_actions: AtomicBool,
+    shutter: Option<ShutterActions>,
+    shutter_detector: Mutex<crate::capture::ShutterDetector>,
 }
 
 struct InputEvent {
@@ -104,6 +109,20 @@ impl<C: openxr_data::Compositor> Input<C> {
         let left_hand_key = map.insert(c"/user/hand/left".into());
         let right_hand_key = map.insert(c"/user/hand/right".into());
         let subaction_paths = SubactionPaths::new(&openxr.instance);
+        let shutter = if cfg!(test) && std::env::var("XRIZER_TEST_CAPTURE").is_err() {
+            None
+        } else {
+            crate::capture::CaptureSettings::from_env()
+                .filter(|settings| settings.is_shutter())
+                .map(|settings| {
+                    ShutterActions::new(
+                        &openxr.instance,
+                        subaction_paths.left,
+                        subaction_paths.right,
+                        &settings,
+                    )
+                })
+        };
         let pose_data = PoseData::new(
             &openxr.instance,
             subaction_paths.left,
@@ -135,6 +154,42 @@ impl<C: openxr_data::Compositor> Input<C> {
             subaction_paths,
             events: Mutex::default(),
             loading_actions: false.into(),
+            shutter,
+            shutter_detector: Mutex::new(crate::capture::ShutterDetector::default()),
+        }
+    }
+
+    fn update_shutter_state(&self, data: &SessionData) {
+        let Some(shutter) = &self.shutter else {
+            return;
+        };
+        let read_value = |action: &xr::Action<f32>, hand: Hand| {
+            action
+                .state(&data.session, self.get_subaction_path(hand))
+                .ok()
+                .filter(|state| state.is_active)
+                .map(|state| state.current_state)
+                .unwrap_or(0.0)
+        };
+        let read_click = |action: &xr::Action<bool>, hand: Hand| {
+            action
+                .state(&data.session, self.get_subaction_path(hand))
+                .ok()
+                .filter(|state| state.is_active)
+                .map(|state| state.current_state)
+                .unwrap_or(false)
+        };
+        let pressed = (read_value(&shutter.left_grip, Hand::Left) >= 0.70
+            || read_click(&shutter.left_grip_click, Hand::Left))
+            && (read_value(&shutter.right_grip, Hand::Right) >= 0.70
+                || read_click(&shutter.right_grip_click, Hand::Right))
+            && (read_value(&shutter.left_trigger, Hand::Left) >= 0.75
+                || read_click(&shutter.left_trigger_click, Hand::Left))
+            && (read_value(&shutter.right_trigger, Hand::Right) >= 0.75
+                || read_click(&shutter.right_trigger_click, Hand::Right));
+        let mut detector = self.shutter_detector.lock().unwrap();
+        if detector.update(pressed, Instant::now(), shutter.hold, shutter.lockout) {
+            crate::capture::request_shutter();
         }
     }
 
@@ -1076,6 +1131,9 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             ));
             sync_sets.push(xr::ActiveActionSet::new(&skeletal_input.set));
             sync_sets.push(xr::ActiveActionSet::new(&actions.haptic_set));
+            if let Some(shutter) = &self.shutter {
+                sync_sets.push(xr::ActiveActionSet::new(&shutter.set));
+            }
             self.legacy_state.on_action_sync();
         }
 
@@ -1083,6 +1141,7 @@ impl<C: openxr_data::Compositor> vr::IVRInput011_Interface for Input<C> {
             tracy_span!("xrSyncActions");
             data.session.sync_actions(&sync_sets).unwrap();
         }
+        self.update_shutter_state(&data);
 
         let devices = data.input_data.devices.read().unwrap();
         let left_profile = devices
@@ -1509,14 +1568,17 @@ impl<C: openxr_data::Compositor> Input<C> {
 
         match input_data.get_legacy_actions() {
             Some(actions) => {
-                data.session
-                    .sync_actions(&[
-                        xr::ActiveActionSet::new(&actions.set),
-                        xr::ActiveActionSet::new(&input_data.pose_data.get().unwrap().set),
-                    ])
-                    .unwrap();
+                let mut sync_sets = vec![
+                    xr::ActiveActionSet::new(&actions.set),
+                    xr::ActiveActionSet::new(&input_data.pose_data.get().unwrap().set),
+                ];
+                if let Some(shutter) = &self.shutter {
+                    sync_sets.push(xr::ActiveActionSet::new(&shutter.set));
+                }
+                data.session.sync_actions(&sync_sets).unwrap();
 
                 self.legacy_state.on_action_sync();
+                self.update_shutter_state(&data);
             }
             None => {
                 if self.loading_actions.load(Ordering::Relaxed) {

@@ -57,9 +57,20 @@ extra GPU work is created.
 ```sh
 XRIZER_CAPTURE=1 \
 XRIZER_CAPTURE_DIR="$HOME/xrizer-captures/VRChat/scene-a" \
+XRIZER_CAPTURE_MODE=interval \
 XRIZER_CAPTURE_INTERVAL_MS=500 \
 XRIZER_CAPTURE_MAX_PAIRS=300 \
 XRIZER_CAPTURE_SCENE="scene-a" \
+  %command%
+```
+
+For controller-triggered captures:
+
+```sh
+XRIZER_CAPTURE=1 \
+XRIZER_CAPTURE_DIR="$HOME/xrizer-captures/VRChat/scene-a" \
+XRIZER_CAPTURE_MODE=shutter \
+XRIZER_CAPTURE_MAX_PAIRS=300 \
   %command%
 ```
 
@@ -67,9 +78,22 @@ XRIZER_CAPTURE_SCENE="scene-a" \
   `XRIZER_CAPTURE=0` disables it even if a directory is set.
 - `XRIZER_CAPTURE_DIR` is the output directory. It is created if missing and
   may be a `captures/highres/<game>/<scene>` directory.
+- `XRIZER_CAPTURE_MODE` selects `interval` (default) or `shutter`.
 - `XRIZER_CAPTURE_INTERVAL_MS` defaults to 500 ms, clamped to 100–60000.
+- In `shutter` mode, hold **both grips and both triggers** for 250 ms
+  (`XRIZER_CAPTURE_HOLD_MS`, default 250, clamped 100–500). One pair is taken
+  per press; a 1 s lockout (`XRIZER_CAPTURE_LOCKOUT_MS`, default 1000, clamped
+  200–5000) rejects quick release/re-press. The detector does not consume or
+  alter the game's input.
+- Shutter detection piggybacks on the game's OpenXR action sync (VRChat and
+  most action-manifest titles). Interval mode does not depend on input.
 - `XRIZER_CAPTURE_MAX_PAIRS` defaults to 300 pairs (600 PNGs), clamped to
-  1–100000. Capture stops automatically; there is no VR hotkey.
+  1–100000. It applies to both modes; capture stops automatically. There is no
+  VR hotkey.
+- In `shutter` mode, a successful pair sends a best-effort freedesktop
+  notification (D-Bus) with the frame number and save directory. If no
+  notification server is available the notification is skipped; capture and
+  gameplay continue. Interval mode does not notify.
 - `XRIZER_CAPTURE_SCENE` is copied into the metadata (default `unspecified`).
 
 Files are `frame_000001_left.png` and `frame_000001_right.png`, plus a
@@ -94,6 +118,7 @@ fence, it does not wait for disk I/O.
   "render_scale": 0.7,
   "output_scale": 1.0,
   "preset": "fsr",
+  "mode": "interval",
   "frames": [
     {
       "index": 1,

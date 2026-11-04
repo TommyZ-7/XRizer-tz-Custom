@@ -250,12 +250,15 @@ For Task 14 training data, XRizer can save the submitted eye textures (before up
 ```sh
 XRIZER_CAPTURE=1 \
 XRIZER_CAPTURE_DIR="$HOME/xrizer-captures/VRChat/scene-a" \
+XRIZER_CAPTURE_MODE=interval \
 XRIZER_CAPTURE_INTERVAL_MS=500 \
 XRIZER_CAPTURE_MAX_PAIRS=300 \
   %command%
 ```
 
-Files are `frame_000001_left.png` and `frame_000001_right.png` plus `metadata.json` (resolution, format, colour space, bounds, `render_scale`, preset, per-eye entries). Capture stops automatically at `XRIZER_CAPTURE_MAX_PAIRS` (default 300 pairs); there is no VR hotkey. `XRIZER_CAPTURE=0` is the off-switch. See `tools/upscaler_dataset.md` for the full layout and metadata. PNG encoding is off the submit path; the submit thread only records a separate command buffer and polls a fence. MSAA is skipped and HDR/10-bit sources are clipped to 8-bit.
+For controller-triggered captures use `XRIZER_CAPTURE_MODE=shutter`: hold **both grips and both triggers** for 250 ms. One pair is taken per press, with a 1 s lockout (`XRIZER_CAPTURE_HOLD_MS` / `XRIZER_CAPTURE_LOCKOUT_MS`). The chord is read through XRizer's OpenXR actions and is not consumed, so the game still receives all buttons. Shutter detection piggybacks on the game's action sync (VRChat and most action-manifest titles); interval mode does not depend on input.
+
+Files are `frame_000001_left.png` and `frame_000001_right.png` plus `metadata.json` (resolution, format, colour space, bounds, `render_scale`, preset, per-eye entries). Capture stops automatically at `XRIZER_CAPTURE_MAX_PAIRS` (default 300 pairs); there is no VR hotkey. `XRIZER_CAPTURE=0` is the off-switch. In shutter mode a successful pair also sends a best-effort freedesktop notification with the frame number and save directory; failure to reach a notification server never blocks capture or gameplay. See `tools/upscaler_dataset.md` for the full layout and metadata. PNG encoding is off the submit path; the submit thread only records a separate command buffer and polls a fence. MSAA is skipped and HDR/10-bit sources are clipped to 8-bit.
 
 The version xrizer reports comes from `git describe`, via the default `git-version` feature. Builds that don't have a git checkout - distribution packages and other builds from a source tarball - can disable that feature with `--no-default-features` (re-enabling the other default features they want, e.g. `--features monado`) and set `XRIZER_VERSION` at build time instead. `XRIZER_VERSION` takes precedence over `git describe` whenever it is set.
 

@@ -4,7 +4,7 @@ mod upscaler;
 use super::GraphicsBackend;
 use crate::upscaler::UpscalerParams;
 use ash::vk::{self, Handle};
-use capture::{CaptureConfig, CaptureSource, CaptureState};
+use capture::{CaptureSource, CaptureState};
 use log::warn;
 use openvr as vr;
 use openxr as xr;
@@ -85,7 +85,7 @@ pub struct VulkanData {
     pub queue: vk::Queue,
     pub queue_family_index: u32,
     ml_feature_supported: OnceLock<bool>,
-    capture_config: Option<CaptureConfig>,
+    capture_config: Option<crate::capture::CaptureSettings>,
     real_data: Option<RealSessionData>,
 }
 
@@ -842,7 +842,7 @@ impl VulkanData {
             queue: vk::Queue::from_raw(data.m_pQueue as _),
             queue_family_index: data.m_nQueueFamilyIndex,
             ml_feature_supported: OnceLock::new(),
-            capture_config: CaptureConfig::from_env(),
+            capture_config: crate::capture::CaptureSettings::from_env(),
             real_data: Default::default(),
         }
     }
@@ -924,7 +924,7 @@ impl VulkanData {
             queue,
             queue_family_index,
             ml_feature_supported: OnceLock::new(),
-            capture_config: CaptureConfig::from_env(),
+            capture_config: crate::capture::CaptureSettings::from_env(),
             real_data: Default::default(),
         }
     }
