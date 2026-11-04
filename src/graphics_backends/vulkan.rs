@@ -266,6 +266,8 @@ impl GraphicsBackend for VulkanData {
                 let created = unsafe {
                     UpscalerPipeline::new(
                         device,
+                        &self.instance,
+                        self.physical_device,
                         data.format,
                         &data.images,
                         data.width,
@@ -292,6 +294,7 @@ impl GraphicsBackend for VulkanData {
                         game_image,
                         game_format,
                         game_layer,
+                        (texture.m_nWidth, texture.m_nHeight),
                         params,
                     ) {
                         warn!("Upscaler render setup failed ({error:?}); falling back");

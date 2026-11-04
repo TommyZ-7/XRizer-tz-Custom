@@ -62,6 +62,48 @@ pub fn local_residual_clamp(residual: f32, local_min: f32, local_max: f32, fract
     residual_clamp(residual, range * fraction.abs())
 }
 
+/// FSR 1 EASU constants. The shader expects perceptual/gamma-space input, so
+/// callers sample an sRGB view and convert as documented by AMD.
+pub fn fsr_easu_con(
+    source_width: u32,
+    source_height: u32,
+    dst_width: u32,
+    dst_height: u32,
+    bounds: [f32; 4],
+) -> [u32; 16] {
+    if source_width == 0 || source_height == 0 || dst_width == 0 || dst_height == 0 {
+        return [0; 16];
+    }
+    let u_min = bounds[0].min(bounds[2]);
+    let v_min = bounds[1].min(bounds[3]);
+    let viewport_width = (bounds[2] - bounds[0]).abs() * source_width as f32;
+    let viewport_height = (bounds[3] - bounds[1]).abs() * source_height as f32;
+    if viewport_width <= 0.0 || viewport_height <= 0.0 {
+        return [0; 16];
+    }
+
+    let mut con = [0u32; 16];
+    con[0] = (viewport_width / dst_width as f32).to_bits();
+    con[1] = (viewport_height / dst_height as f32).to_bits();
+    con[2] =
+        (0.5 * viewport_width / dst_width as f32 - 0.5 + u_min * source_width as f32).to_bits();
+    con[3] =
+        (0.5 * viewport_height / dst_height as f32 - 0.5 + v_min * source_height as f32).to_bits();
+    con[4] = (1.0 / source_width as f32).to_bits();
+    con[5] = (1.0 / source_height as f32).to_bits();
+    con[6] = (1.0 / source_width as f32).to_bits();
+    con[7] = (-1.0 / source_height as f32).to_bits();
+    con[8] = (-1.0 / source_width as f32).to_bits();
+    con[9] = (2.0 / source_height as f32).to_bits();
+    con[10] = (1.0 / source_width as f32).to_bits();
+    con[11] = (2.0 / source_height as f32).to_bits();
+    con[12] = 0;
+    con[13] = (4.0 / source_height as f32).to_bits();
+    con[14] = 0;
+    con[15] = 0;
+    con
+}
+
 /// Bounding box of pixels with `weight > epsilon`, in output pixels.
 ///
 /// The returned rectangle is clamped to the frame. A field that covers the

@@ -17,6 +17,8 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
         ("upscaler.vert", "vert_upscaler.spv"),
         ("upscaler.frag", "frag_upscaler.spv"),
         ("fast.frag", "frag_fast.spv"),
+        ("fsr_easu.frag", "frag_fsr_easu.spv"),
+        ("enhance.frag", "frag_enhance.spv"),
     ];
 
     let cache_path = PathBuf::from(out_dir).join("shader_cache.json");
@@ -28,6 +30,10 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
 
     let shader_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let out_dir = PathBuf::from(out_dir);
+    let headers: Vec<PathBuf> = ["ffx_a.h", "ffx_fsr1.h"]
+        .into_iter()
+        .map(|header| shader_dir.join(header))
+        .collect();
     for (source, output) in shaders {
         let source = shader_dir.join(source);
         let output = out_dir.join(output);
@@ -50,18 +56,22 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
             continue;
         }
 
-        compile_shader(&source, &output);
+        compile_shader(&source, &output, &shader_dir);
         add_to_cache(SystemTime::now());
     }
 
     let cache = std::fs::File::create(cache_path).expect("Couldn't create cache file");
     serde_json::to_writer(cache, &new_cache).expect("Couldn't write cache");
-    new_cache.into_keys().collect()
+    let mut outputs: Vec<PathBuf> = new_cache.into_keys().collect();
+    outputs.extend(headers);
+    outputs
 }
 
-fn compile_shader(input: &Path, output: &Path) {
+fn compile_shader(input: &Path, output: &Path, include_dir: &Path) {
     let success = Command::new("glslc")
         .arg("-O")
+        .arg("-I")
+        .arg(include_dir)
         .arg(input)
         .arg("-o")
         .arg(output)

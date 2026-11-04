@@ -233,6 +233,22 @@ impl UpscalerParams {
         params
     }
 
+    /// FSR 1 EASU constants for this output size and source extent.
+    pub fn fsr_easu_con(&self, source_width: u32, source_height: u32) -> [u32; 16] {
+        math::fsr_easu_con(
+            source_width,
+            source_height,
+            self.dst_width,
+            self.dst_height,
+            [
+                self.src_bounds.uMin,
+                self.src_bounds.vMin,
+                self.src_bounds.uMax,
+                self.src_bounds.vMax,
+            ],
+        )
+    }
+
     /// Bounding box of pixels with `weight > epsilon`, in output pixels.
     pub fn ml_bounds(&self, epsilon: f32) -> (u32, u32, u32, u32) {
         math::ml_bounds(
@@ -684,6 +700,30 @@ mod tests {
         assert!(!upscaler_allowed(true, 2));
         assert!(!upscaler_allowed(true, 4));
         assert!(!upscaler_allowed(false, 1));
+    }
+
+    #[test]
+    fn fsr_constants_are_finite_and_nonzero() {
+        let b = full_bounds();
+        let c = UpscalerConfig {
+            enabled: true,
+            preset: UpscalerPreset::Fsr,
+            output_scale: 0.7,
+            ..Default::default()
+        };
+        let p = c.params_for_size(1000, 800, b).unwrap();
+        assert_eq!(p.shader_kind(), 2);
+        let con = p.fsr_easu_con(1000, 800);
+        for (index, bits) in con.iter().enumerate() {
+            assert!(
+                f32::from_bits(*bits).is_finite(),
+                "constant {index} is not finite"
+            );
+        }
+        assert_ne!(con[0], 0);
+        assert_ne!(con[1], 0);
+        assert_ne!(con[4], 0);
+        assert_ne!(con[5], 0);
     }
 
     #[test]

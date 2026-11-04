@@ -192,6 +192,8 @@ vr::VRSettings()->SetFloat("xrizer", "brightness", 0.5f); // also persisted to f
 
 Default off. The config lives at `~/.config/xrizer/upscaler.json` (override with `XRIZER_UPSCALER_CONFIG`); it is hot-reloaded every 500 ms and a broken file keeps the last good settings. Presets are `fast`, `balanced`, `fsr`, and `ml`. Enhancement is controlled by a continuous field: `center` (UV), full-weight `radius`, falloff `feather`, and `strength`. The base resample always covers the whole frame; `radius: 2.0` means full-frame enhancement.
 
+`fsr` uses AMD FidelityFX Super Resolution 1 (EASU + RCAS), MIT-licensed; the AMD notice is preserved in `shaders/src/ffx_a.h` and `shaders/src/ffx_fsr1.h`. FSR expects an anti-aliased, post-tonemap input. `balanced` uses Snapdragon Game Super Resolution 1 (BSD-3) from Task 7 onward. XRizer does not copy TrueFovea code, shaders, constants, weights, or file formats.
+
 The ML presets need the opt-in Vulkan feature layer so a DXVK-created device exposes `shaderIntegerDotProduct` (DP4A) and, for the experiment, `VK_KHR_cooperative_matrix`. The layer only edits `vkCreateDevice`, fails open, and is never required for `fast`/`balanced`/`fsr`.
 
 ```sh

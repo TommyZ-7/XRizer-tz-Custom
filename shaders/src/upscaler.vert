@@ -9,6 +9,10 @@ layout(push_constant) uniform PushConstants {
     uint flags;
     uint dst_width;
     uint dst_height;
+    uvec4 con0;
+    uvec4 con1;
+    uvec4 con2;
+    uvec4 con3;
 } pc;
 
 layout(location = 0) out vec2 v_uv;
