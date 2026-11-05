@@ -1,12 +1,11 @@
 //! Vulkan upscaler pipeline. Task 3 is a pass-through; later tasks add the
 //! fast/SGSR/FSR/ML variants behind the same interface.
 
+use super::source_view_cache::{ExtentTracker, SourceKey, SourceViewCache};
 use crate::upscaler::model::{Model, ModelKind};
 use crate::upscaler::{FLAG_ML_ACTIVE, FLAG_OUTPUT_UNORM, UpscalerParams, UpscalerPreset};
 use ash::vk;
-use ash::vk::Handle;
 use log::warn;
-use std::collections::HashMap;
 
 #[repr(C)]
 struct PushConstants {
@@ -50,7 +49,8 @@ pub struct UpscalerPipeline {
     sampler: vk::Sampler,
     output_views: Vec<[vk::ImageView; 2]>,
     framebuffers: Vec<[vk::Framebuffer; 2]>,
-    source_views: HashMap<(u64, i32, u32), vk::ImageView>,
+    source_views: SourceViewCache,
+    input_extent: ExtentTracker,
     ml: Option<MlResources>,
     width: u32,
     height: u32,
@@ -414,7 +414,8 @@ impl UpscalerPipeline {
                 sampler,
                 output_views,
                 framebuffers,
-                source_views: HashMap::new(),
+                source_views: SourceViewCache::default(),
+                input_extent: ExtentTracker::default(),
                 width,
                 height,
             })
@@ -436,20 +437,10 @@ impl UpscalerPipeline {
     ) -> Result<(), vk::Result> {
         unsafe {
             let use_ml = params.preset == UpscalerPreset::Ml && self.ml.is_some() && params.enabled;
-            let key = (source_image.as_raw(), source_format.as_raw(), source_layer);
-            let source_view = if let Some(view) = self.source_views.get(&key) {
-                *view
+            let key = SourceKey::new(source_image, source_format, source_layer, source_extent);
+            let source_view = if let Some(view) = self.source_views.get(key) {
+                view
             } else {
-                if self.source_views.len() >= 32 {
-                    // Game textures can be recreated with a reused handle. Do
-                    // not keep views beyond a bounded cache; wait for the GPU
-                    // before destroying them.
-                    let _ = device.device_wait_idle();
-                    for view in self.source_views.values() {
-                        device.destroy_image_view(*view, None);
-                    }
-                    self.source_views.clear();
-                }
                 let view = device.create_image_view(
                     &vk::ImageViewCreateInfo::default()
                         .image(source_image)
@@ -721,6 +712,28 @@ impl UpscalerPipeline {
         }
     }
 
+    /// Prepare the source-view cache before the first eye of a frame records.
+    /// Clears all views when the input extent changed, or when the cache has
+    /// grown to its bound. Never called between the two eyes.
+    pub unsafe fn prepare_source_views(&mut self, device: &ash::Device, input_extent: (u32, u32)) {
+        self.input_extent.observe(input_extent);
+        if self.input_extent.take_dirty() || self.source_views.count() >= 32 {
+            unsafe { self.clear_source_views(device) };
+        }
+    }
+
+    unsafe fn clear_source_views(&mut self, device: &ash::Device) {
+        unsafe {
+            if self.source_views.count() == 0 {
+                return;
+            }
+            let _ = device.device_wait_idle();
+            for view in self.source_views.drain() {
+                device.destroy_image_view(view, None);
+            }
+        }
+    }
+
     pub unsafe fn destroy(&self, device: &ash::Device) {
         unsafe {
             if let Some(ml) = &self.ml {
@@ -736,8 +749,8 @@ impl UpscalerPipeline {
                     device.destroy_framebuffer(*framebuffer, None);
                 }
             }
-            for view in self.source_views.values() {
-                device.destroy_image_view(*view, None);
+            for view in self.source_views.iter() {
+                device.destroy_image_view(view, None);
             }
             device.destroy_sampler(self.sampler, None);
             device.destroy_descriptor_pool(self.pool, None);

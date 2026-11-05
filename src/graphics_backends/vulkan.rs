@@ -1,4 +1,5 @@
 mod capture;
+mod source_view_cache;
 mod upscaler;
 
 use super::GraphicsBackend;
@@ -152,6 +153,11 @@ impl GraphicsBackend for VulkanData {
             None
         }
     }
+
+    fn source_texture_extent(texture: Self::OpenVrTexture) -> Option<(u32, u32)> {
+        let texture = unsafe { texture.as_ref() }?;
+        Some((texture.m_nWidth, texture.m_nHeight))
+    }
     fn store_swapchain_images(&mut self, images: Vec<u64>, format: u32, width: u32, height: u32) {
         let images: Vec<vk::Image> = images.into_iter().map(vk::Image::from_raw).collect();
         let image_count = images.len();
@@ -234,6 +240,16 @@ impl GraphicsBackend for VulkanData {
         self.real_data
             .as_ref()
             .is_some_and(|data| !data.upscaler_failed)
+    }
+
+    fn prepare_upscaler_source_views(&mut self, input_extent: (u32, u32)) {
+        let Some(data) = self.real_data.as_mut() else {
+            return;
+        };
+        let Some(pipeline) = data.upscaler_pipeline.as_mut() else {
+            return;
+        };
+        unsafe { pipeline.prepare_source_views(&self.device, input_extent) };
     }
 
     fn supports_ml_upscaler(&self) -> bool {
@@ -371,7 +387,15 @@ impl GraphicsBackend for VulkanData {
                     )
                 };
                 match created {
-                    Ok(pipeline) => data.upscaler_pipeline = Some(pipeline),
+                    Ok(mut pipeline) => {
+                        unsafe {
+                            pipeline.prepare_source_views(
+                                &self.device,
+                                (texture.m_nWidth, texture.m_nHeight),
+                            );
+                        }
+                        data.upscaler_pipeline = Some(pipeline);
+                    }
                     Err(error) => {
                         warn!("Failed to create upscaler pipeline ({error:?}); using copy path");
                         data.upscaler_failed = true;

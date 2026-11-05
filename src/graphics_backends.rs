@@ -20,6 +20,11 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
     /// Returns None if the texture is invalid.
     fn get_texture(texture: &vr::Texture_t) -> Option<Self::OpenVrTexture>;
 
+    /// Full extent of the game-owned source texture, before bounds are applied.
+    fn source_texture_extent(_texture: Self::OpenVrTexture) -> Option<(u32, u32)> {
+        None
+    }
+
     fn swapchain_info_for_texture(
         &self,
         texture: Self::OpenVrTexture,
@@ -45,6 +50,11 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
     fn supports_ml_upscaler(&self) -> bool {
         false
     }
+
+    /// Prepare cached views of application-owned source images for a frame.
+    /// Called on the first eye before either eye records a copy; the backend
+    /// clears its cache when `input_extent` changed or the cache is full.
+    fn prepare_upscaler_source_views(&mut self, _input_extent: (u32, u32)) {}
 
     #[allow(clippy::too_many_arguments)]
     fn copy_texture_to_swapchain(
