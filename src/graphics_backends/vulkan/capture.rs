@@ -6,13 +6,12 @@
 //! lossless PNGs plus metadata. The submit path only records a separate command
 //! buffer and never waits for the PNG encoder.
 
+use super::source_view_cache::{ExtentTracker, SourceKey, SourceViewCache};
 use crate::capture::{CaptureMode, CaptureSettings};
 use ash::vk;
-use ash::vk::Handle;
 use log::{info, warn};
 use openvr as vr;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
@@ -222,6 +221,7 @@ pub struct CaptureState {
     pending: bool,
     sources: [Option<CaptureSource>; 2],
     flight: Option<CaptureFlight>,
+    source_extent: ExtentTracker,
     stopped: bool,
 }
 
@@ -302,6 +302,7 @@ impl CaptureState {
             pending: false,
             sources: [None; 2],
             flight: None,
+            source_extent: ExtentTracker::default(),
             stopped: false,
         })
     }
@@ -310,6 +311,13 @@ impl CaptureState {
         if self.stopped {
             crate::capture::clear_shutter_request();
             return;
+        }
+        // Track the left eye's texture extent even while a previous flight is
+        // pending: the game may resize (and recreate the image) between two
+        // captures. Captures require equal eye sizes, so the left eye is
+        // sufficient and avoids invalidating twice for per-eye differences.
+        if eye == 0 && source.width > 0 && source.height > 0 {
+            self.source_extent.observe((source.width, source.height));
         }
         if self.flight.is_some() {
             return;
@@ -357,6 +365,21 @@ impl CaptureState {
                     destroy_flight(device, flight);
                     self.next_due = now + self.config.interval;
                 }
+            }
+        }
+
+        // Destroying the pipeline is only safe once the previous readback has
+        // completed. A resize between captures must still discard the cached
+        // views, otherwise A -> B -> A could reuse a view of the old A image.
+        if self.flight.is_none() {
+            if self.source_extent.take_dirty() {
+                if let Some(old) = self.pipeline.take() {
+                    unsafe { old.destroy(device) };
+                }
+                self.pipeline_key = None;
+            }
+            if let Some(pipeline) = self.pipeline.as_mut() {
+                unsafe { pipeline.prepare(device) };
             }
         }
 
@@ -653,7 +676,7 @@ struct CapturePipeline {
     memory: vk::DeviceMemory,
     views: [vk::ImageView; 2],
     framebuffers: [vk::Framebuffer; 2],
-    source_views: HashMap<(u64, i32, u32), vk::ImageView>,
+    source_views: SourceViewCache,
     width: u32,
     height: u32,
 }
@@ -835,10 +858,23 @@ impl CapturePipeline {
                 memory,
                 views,
                 framebuffers,
-                source_views: HashMap::new(),
+                source_views: SourceViewCache::default(),
                 width,
                 height,
             })
+        }
+    }
+
+    /// Bound the cache at a safe point (after any previous readback finished).
+    unsafe fn prepare(&mut self, device: &ash::Device) {
+        unsafe {
+            if self.source_views.count() < 16 {
+                return;
+            }
+            let _ = device.device_wait_idle();
+            for view in self.source_views.drain() {
+                device.destroy_image_view(view, None);
+            }
         }
     }
 
@@ -851,17 +887,11 @@ impl CapturePipeline {
         buffer: vk::Buffer,
     ) -> Result<(), vk::Result> {
         unsafe {
-            let key = (source.image.as_raw(), source.format.as_raw(), source.layer);
-            let view = if let Some(view) = self.source_views.get(&key) {
-                *view
+            let source_extent = (source.width, source.height);
+            let key = SourceKey::new(source.image, source.format, source.layer, source_extent);
+            let view = if let Some(view) = self.source_views.get(key) {
+                view
             } else {
-                if self.source_views.len() >= 16 {
-                    let _ = device.device_wait_idle();
-                    for view in self.source_views.values() {
-                        device.destroy_image_view(*view, None);
-                    }
-                    self.source_views.clear();
-                }
                 let view = device.create_image_view(
                     &vk::ImageViewCreateInfo::default()
                         .image(source.image)
@@ -1005,8 +1035,8 @@ impl CapturePipeline {
 
     unsafe fn destroy(&self, device: &ash::Device) {
         unsafe {
-            for view in self.source_views.values() {
-                device.destroy_image_view(*view, None);
+            for view in self.source_views.iter() {
+                device.destroy_image_view(view, None);
             }
             for view in &self.views {
                 device.destroy_image_view(*view, None);
