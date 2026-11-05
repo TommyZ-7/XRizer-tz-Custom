@@ -775,4 +775,43 @@ mod tests {
         let path = default_model_path();
         assert!(path.ends_with("upscaler_model.xru"));
     }
+
+    /// Fixture generator for ML smoke tests (not a regular test): writes
+    /// one of the built-in self-test models to an XRU1 file so the ML
+    /// upscaler path can be exercised before a trained model exists.
+    ///
+    ///   XRIZER_SELF_TEST_MODEL_OUT=upscaler_model.xru \
+    ///   XRIZER_SELF_TEST_MODEL_KIND=residual_cnn \
+    ///   XRIZER_SELF_TEST_MODEL_CHANNELS=16 \
+    ///   cargo test --lib write_self_test_model_file -- --ignored --nocapture
+    ///
+    /// KIND is residual_cnn (default), srpo or mlp; CHANNELS is the CNN
+    /// channel count (8/16/32) or the MLP hidden size (8/16).
+    #[test]
+    #[ignore = "fixture generator; set XRIZER_SELF_TEST_MODEL_OUT"]
+    fn write_self_test_model_file() {
+        let out = std::env::var("XRIZER_SELF_TEST_MODEL_OUT")
+            .expect("set XRIZER_SELF_TEST_MODEL_OUT to the output .xru path");
+        let kind = std::env::var("XRIZER_SELF_TEST_MODEL_KIND")
+            .unwrap_or_else(|_| "residual_cnn".to_string());
+        let channels: u16 = std::env::var("XRIZER_SELF_TEST_MODEL_CHANNELS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(16);
+        let model = match kind.as_str() {
+            "residual_cnn" => Model::self_test_residual_cnn(channels),
+            "srpo" => Model::self_test_srpo(channels),
+            "mlp" => Model::self_test_mlp(channels),
+            other => panic!("unknown kind {other} (expected residual_cnn, srpo or mlp)"),
+        }
+        .expect("self-test model");
+        let bytes = model.to_bytes();
+        let parsed = Model::parse(&bytes).expect("generated model must parse");
+        assert_eq!(parsed.kind, model.kind);
+        std::fs::write(&out, &bytes).expect("write model file");
+        println!(
+            "wrote {out}: kind={kind} channels={channels} bytes={}",
+            bytes.len()
+        );
+    }
 }
