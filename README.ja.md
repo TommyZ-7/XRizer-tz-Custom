@@ -119,60 +119,47 @@ echo 1.0 > ~/.config/xrizer_brightness   # リセット
 vr::VRSettings()->SetFloat("xrizer", "brightness", 0.5f); // ファイルにも永続化
 ```
 
-## 3. 実験的空間アップスケーラ（Vulkan）
+## 3. 実験的アンチエイリアス（Vulkan）
 
-既定は無効。設定は `~/.config/xrizer/upscaler.json`（`XRIZER_UPSCALER_CONFIG` で上書き）に置き、500 ms ごとにホットリロードします。壊れた JSON の場合は直前の設定を維持します。プリセットは `fast` / `balanced` / `fsr` / `ml`。補正は連続的な重み場で制御します: `center`（UV）、全強度半径 `radius`、減衰幅 `feather`、`strength`。基礎リサンプルは常に画面全体に適用され、`radius: 2.0` で全面補正になります。
+既定は無効。設定は `~/.config/xrizer/upscaler.json`（`XRIZER_UPSCALER_CONFIG` で上書き）に置き、500 ms ごとにホットリロードします。壊れた JSON の場合は直前の設定を維持します。
 
-`fsr` は AMD FidelityFX Super Resolution 1（EASU + RCAS、MIT）を使用し、AMD の著作権表示を `shaders/src/ffx_a.h` と `shaders/src/ffx_fsr1.h` に保持しています。FSR はアンチエイリアス済み・トーンマップ後の入力を前提とします。`balanced` は Snapdragon Game Super Resolution 1（SGSR 1、BSD-3-Clause）を使用し、Qualcomm の著作権表示と BSD-3-Clause 全文を `shaders/src/sgsr1.frag` と `shaders/src/SGSR-LICENSE.txt` に保持しています。SGSR 1 は全面 12 タップの基礎フィルタで、適応シャープニングのみを半径方向の重みでスケールします。XRizer は TrueFovea のコード・シェーダ・定数・重み・ファイル形式をコピーしません。
+このフォークは AA 専用です。提出画像のサイズは変更せず、出力解像度は常に入力と同じです。B1a でアップスケーラのプリセット、EASU、SGSR、ML モデル、Vulkan 機能レイヤーを撤去しました。B1b で等倍 FXAA、B2 で CMAA2、B3 で SMAA 1x を追加します。
 
-`ml` は中立な `XRU1` モデル（既定 `~/.config/xrizer/upscaler_model.xru`、`model_path` で上書き）を読み込みます。主モデルは 3x3 の基礎タップ＋3 層 INT8 DP4A（8/16/32 チャンネル）の残差 CNN で、クランプした残差に半径方向の重みを掛けます。ピクセル単位 MLP はベースラインです。実験的な SRPO 形式のオフセット予測は次段階で、最初の出荷 ML プリセットではありません。モデルがない／不正な場合は FSR にフォールバックします。
+重み場は3モードです:
 
-ML プリセットには opt-in の Vulkan レイヤーが必要です。DXVK が作るデバイスに `shaderIntegerDotProduct`（DP4A）と、実験用の `VK_KHR_cooperative_matrix` を追加します。レイヤーは `vkCreateDevice` のみを編集し、失敗時は元の作成情報で続行します。`fast` / `balanced` / `fsr` には不要です。
+- `center`: 中心で最大、`radius + feather` の外側で0（旧 `field_weight`）。
+- `inverted`: `radius` の内側で0、周辺で最大（既定）。
+- `whole`: 全面一様。`center` / `center_offset` / `radius` / `feather` は無視。
 
-```sh
-# ビルドしてランタイム隣にレイヤーを配置
-cargo xbuild
-
-# ポータブル利用（loader 1.3.296+）
-XRIZER_UPSCALER_VK_LAYER=1 \
-VK_ADD_IMPLICIT_LAYER_PATH="$PWD/target/debug/vulkan/implicit_layer.d" %command%
-
-# ユーザーディレクトリへインストール（Steam Linux Runtime 推奨）
-scripts/install-vulkan-layer.sh --user
-# 削除: scripts/install-vulkan-layer.sh --remove
-
-# 強制オフ（有効化変数より優先）
-XRIZER_UPSCALER_VK_LAYER_DISABLE=1
-```
-
-`VK_LOADER_DEBUG=layer` で `VK_LAYER_XRIZER_upscaler` がロードされたか確認できます。レイヤーがない／無効／機能を追加できない場合は ML が FSR 1 にフォールバックし、ゲームは起動し続けます。
+`center_offset` は左右眼で逆方向に中心を補正します。0.6.4 の検証で左右の円の位置がズレて見えたための項目です。
 
 `~/.config/xrizer/upscaler.json` の例:
 
 ```json
 {
   "enabled": true,
-  "preset": "fsr",
+  "antialias": "cmaa2",
+  "weight_mode": "inverted",
   "center": [0.5, 0.5],
+  "center_offset": 0.0,
   "radius": 0.35,
   "feather": 0.10,
   "strength": 1.0,
-  "output_scale": 1.0,
   "preserve_alpha": true,
+  "fxaa_quality": "quality",
+  "smaa_threshold": 0.1,
   "compare": false,
+  "compare_interval_ms": 2000,
   "show_region": false,
-  "model_path": null,
   "auto_scale": false,
   "min_scale": 0.5,
   "max_scale": 1.5
 }
 ```
 
-推奨開始点は `xrizer_scale=0.7`（ゲームが 70% で描画し、XRizer がランタイム推奨サイズへ拡大）。全面補正は `radius: 2.0, feather: 0.0`。`auto_scale` は 0.05 刻みで `xrizer_scale` を調整し、30 フレームの低速／60 フレームの高速ヒステリシスと `min_scale..max_scale` のクランプを使います。
+旧キー `preset` / `output_scale` / `model_path` / ML 関連キーは無視され、未知キーとして保持されます。`auto_scale` / `min_scale` / `max_scale` はゲーム側の描画倍率で、AA パスとは別です。
 
-診断はカウンタのみ（画像内容なし）: フレーム数、アップスケール数、fast/SGSR/FSR/MLP/CNN/SRPO、フォールバック数、最後の理由。300 フレームごとに `$XDG_STATE_HOME/xrizer/xrizer.txt` へ要約を記録します。
-
-予算と制限: ステレオ合計 <=1.0 ms、通常 <=0.5 ms を目標。ML は半径方向の重みの外接矩形内だけにディスパッチし、機能／モデル／パイプラインがない場合は FSR/SGSR にフォールバックします。GPU タイムスタンプによる予算強制は未実装で、実機ベンチマーク段階の項目です。ランタイムのレンズ歪み前に、ゲームのプロジェクションレイヤーだけを処理するため、オーバーレイは強調されません。現状 Vulkan のみで、OpenGL は従来のコピー経路です。FSR 1 はアンチエイリアス済み・トーンマップ後の入力を前提とします。エンジンの履歴・モーションベクタ・深度はないため、時間方向のちらつきは残差クランプとビデオ評価で抑えます。MSAA は既存の resolve 経路、動的解像度変更でも出力スワップチェーンは再作成しません。
+診断はカウンタのみ（画像内容なし）: フレーム数、AA フレーム数、FXAA/CMAA2/SMAA、フォールバック数、最後の理由。300 フレームごとに `$XDG_STATE_HOME/xrizer/xrizer.txt` へ要約を記録します。MSAA は既存の resolve 経路です。
 
 ### 学習用キャプチャ（opt-in）
 

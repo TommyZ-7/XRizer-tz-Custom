@@ -188,60 +188,47 @@ echo 1.0 > ~/.config/xrizer_brightness   # reset
 vr::VRSettings()->SetFloat("xrizer", "brightness", 0.5f); // also persisted to file
 ```
 
-## Experimental Spatial Upscaler (Vulkan) — This Fork Only
+## Experimental Antialiasing (Vulkan) — This Fork Only
 
-Default off. The config lives at `~/.config/xrizer/upscaler.json` (override with `XRIZER_UPSCALER_CONFIG`); it is hot-reloaded every 500 ms and a broken file keeps the last good settings. Presets are `fast`, `balanced`, `fsr`, and `ml`. Enhancement is controlled by a continuous field: `center` (UV), full-weight `radius`, falloff `feather`, and `strength`. The base resample always covers the whole frame; `radius: 2.0` means full-frame enhancement.
+Default off. The config lives at `~/.config/xrizer/upscaler.json` (override with `XRIZER_UPSCALER_CONFIG`); it is hot-reloaded every 500 ms and a broken file keeps the last good settings.
 
-`fsr` uses AMD FidelityFX Super Resolution 1 (EASU + RCAS), MIT-licensed; the AMD notice is preserved in `shaders/src/ffx_a.h` and `shaders/src/ffx_fsr1.h`. FSR expects an anti-aliased, post-tonemap input. `balanced` uses Snapdragon Game Super Resolution 1 (SGSR 1), BSD-3-Clause; the Qualcomm notice and full BSD-3-Clause text are preserved in `shaders/src/sgsr1.frag` and `shaders/src/SGSR-LICENSE.txt`. SGSR 1 is a full-frame 12-tap base filter, with only its adaptive sharpening scaled by the radial weight. XRizer does not copy TrueFovea code, shaders, constants, weights, or file formats.
+This fork is now AA-only. It never resizes the submitted eye image; the output extent equals the input extent. The upscaler presets, EASU, SGSR, ML model, and Vulkan feature layer were removed in B1a. B1b adds the equal-size FXAA pass; CMAA2 and SMAA 1x follow in B2 and B3.
 
-`ml` loads a neutral `XRU1` model (default `~/.config/xrizer/upscaler_model.xru`, override with `model_path`). The main model is a residual CNN: 3x3 base taps, three INT8 DP4A layers, 8/16/32 channels, and a clamped residual multiplied by the radial weight. The per-pixel MLP is the baseline. An experimental SRPO-style offset predictor is the next stage and is not the first shipping ML preset. Missing/invalid models fall back to FSR.
+The radial weight field has three modes:
 
-The ML presets need the opt-in Vulkan feature layer so a DXVK-created device exposes `shaderIntegerDotProduct` (DP4A) and, for the experiment, `VK_KHR_cooperative_matrix`. The layer only edits `vkCreateDevice`, fails open, and is never required for `fast`/`balanced`/`fsr`.
+- `center`: maximum at the centre, zero outside `radius + feather` (the old `field_weight`).
+- `inverted`: zero inside `radius`, maximum at the periphery (default).
+- `whole`: uniform weight over the whole image; `center`, `center_offset`, `radius`, and `feather` are ignored.
 
-```sh
-# Build and stage the layer next to the runtime
-cargo xbuild
-
-# Portable use (loader 1.3.296+)
-XRIZER_UPSCALER_VK_LAYER=1 \
-VK_ADD_IMPLICIT_LAYER_PATH="$PWD/target/debug/vulkan/implicit_layer.d" %command%
-
-# Or install into the user data dir (recommended for Steam Linux Runtime)
-scripts/install-vulkan-layer.sh --user
-# remove with: scripts/install-vulkan-layer.sh --remove
-
-# Mandatory off-switch, even when the enable variable is set
-XRIZER_UPSCALER_VK_LAYER_DISABLE=1
-```
-
-`VK_LOADER_DEBUG=layer` shows whether `VK_LAYER_XRIZER_upscaler` was loaded. If the layer is absent, disabled, or declines a feature, ML falls back to FSR 1; the game must still start.
+`center_offset` moves the field outward for the left eye and inward for the right eye (or vice versa depending on sign), matching the per-eye projection asymmetry seen in the 0.6.4 tests.
 
 Example `~/.config/xrizer/upscaler.json`:
 
 ```json
 {
   "enabled": true,
-  "preset": "fsr",
+  "antialias": "cmaa2",
+  "weight_mode": "inverted",
   "center": [0.5, 0.5],
+  "center_offset": 0.0,
   "radius": 0.35,
   "feather": 0.10,
   "strength": 1.0,
-  "output_scale": 1.0,
   "preserve_alpha": true,
+  "fxaa_quality": "quality",
+  "smaa_threshold": 0.1,
   "compare": false,
+  "compare_interval_ms": 2000,
   "show_region": false,
-  "model_path": null,
   "auto_scale": false,
   "min_scale": 0.5,
   "max_scale": 1.5
 }
 ```
 
-Recommended starting point: `xrizer_scale=0.7` (the game renders at 70 %, XRizer upscales to the runtime-recommended size). For full-frame enhancement use `radius: 2.0, feather: 0.0`. `auto_scale` adjusts `xrizer_scale` in 0.05 steps with 30-frame slow / 60-frame fast hysteresis and clamps to `min_scale..max_scale`.
+The old keys `preset`, `output_scale`, `model_path`, and the ML keys are ignored and preserved as unknown keys. `auto_scale`, `min_scale`, and `max_scale` still control the game-side render scale; they are not part of the AA pass.
 
-Diagnostics are counters only (no image contents): frames, upscaled frames, fast/SGSR/FSR/MLP/CNN/SRPO counts, fallback count, and the last fallback reason. A summary is logged every 300 frames to `$XDG_STATE_HOME/xrizer/xrizer.txt`.
-
-Budget and limits: aim for <=1.0 ms stereo total and <=0.5 ms typical. ML is dispatched only inside the radial weight bounding box; feature/model/pipeline failures fall back to FSR/SGSR. GPU timestamp budget enforcement is not active yet; it is part of the on-target benchmark phase. The upscaler runs before runtime lens distortion and only on the game projection layer, so overlays are never sharpened. It is Vulkan-only for now; OpenGL keeps the old copy path. FSR 1 expects anti-aliased, post-tonemap input. There is no engine history, motion vector, or depth input, so temporal shimmer must be controlled by residual clamping and evaluated on video. MSAA submissions take the existing resolve path. Dynamic render scale does not resize the output swapchain.
+Diagnostics are counters only (no image contents): frames, AA frames, FXAA/CMAA2/SMAA counts, fallback count, and the last fallback reason. A summary is logged every 300 frames to `$XDG_STATE_HOME/xrizer/xrizer.txt`. MSAA submissions take the existing resolve path.
 
 ### Training captures (opt-in)
 

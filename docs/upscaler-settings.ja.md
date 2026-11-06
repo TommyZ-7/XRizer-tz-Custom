@@ -1,12 +1,12 @@
-# 空間アップスケーラ設定説明書
+# アンチエイリアス設定説明書
 
-XRizer の実験的空間アップスケーラの設定リファレンスです。対象は Linux（WiVRn／Monado）で XRizer 経由で動作するゲームのみで、Vulkan 専用です。既定では無効です。
+XRizer の実験的アンチエイリアス（AA）の設定リファレンスです。対象は Linux（WiVRn／Monado）で XRizer 経由で動作する Vulkan ゲームです。既定では無効です。
 
 ## 設定ファイル
 
 - 場所: `~/.config/xrizer/upscaler.json`（`XDG_CONFIG_HOME` が設定されている場合は `$XDG_CONFIG_HOME/xrizer/upscaler.json`）
 - 環境変数 `XRIZER_UPSCALER_CONFIG` で任意のパスに変更できます
-- 500ms ごとに自動で再読み込みされます（ホットリロード）。ゲームの再起動は不要です
+- 500 ms ごとに自動で再読み込みされます（ホットリロード）。ゲームの再起動は不要です
 - ファイルが壊れている場合は、最後に正常だった設定が使われ続けます
 - すべての項目は省略可能です。省略した項目には既定値が使われます。範囲外の数値は自動で範囲内に丸められます
 
@@ -14,99 +14,61 @@ XRizer の実験的空間アップスケーラの設定リファレンスです�
 
 | 項目 | 型 | 既定値 | 範囲 | 説明 |
 |---|---|---|---|---|
-| `enabled` | bool | `false` | — | アップスケーラ全体の有効／無効 |
-| `preset` | string | `"balanced"` | `fast`／`balanced`／`fsr`／`ml` | 処理方式（後述） |
-| `center` | [x, y] | `[0.5, 0.5]` | 各 0.0〜1.0 | 強調の中心。歪み補正前の眼テクスチャ UV 空間での位置 |
-| `radius` | number | `0.35` | 0.05〜2.0 | 強調の重みが最大になる半径 |
-| `feather` | number | `0.10` | 0.0〜1.0 | `radius` の外側で重みが 0 へ落ちるまでの幅 |
-| `strength` | number | `1.0` | 0.0〜3.0 | 強調（ML 残差とシャープニング）の強さ。基礎リサンプルには影響しません |
-| `output_scale` | number | `1.0` | 0.5〜2.0 | 出力解像度の倍率。ランタイム推奨サイズに対して乗算されます |
-| `preserve_alpha` | bool | `true` | — | 半透明ピクセル（alpha < 0.999）を強調せずそのまま保持します |
-| `compare` | bool | `false` | — | 2秒ごとに強調の有効／無効を切り替える A/B 比較用。基礎リサンプルは常に有効です |
-| `show_region` | bool | `false` | — | `radius` の等高線（重み最大の境界）を画面に描きます。調整用です |
-| `model_path` | string／null | `null` | — | `ml` プリセットのモデル（XRU1 形式）のパス。`null` の場合は `~/.config/xrizer/upscaler_model.xru` |
-| `auto_scale` | bool | `false` | — | フレーム時間を見て、ゲーム側のスーパーサンプル倍率を自動調整します |
-| `min_scale` | number | `0.5` | 0.1〜4.0 | `auto_scale` の倍率の下限 |
-| `max_scale` | number | `1.5` | 0.1〜4.0 | `auto_scale` の倍率の上限。`min_scale` より小さい場合は入れ替えて解釈されます |
+| `enabled` | bool | `false` | — | AA 全体の有効／無効 |
+| `antialias` | string | `"cmaa2"` | `off` / `cmaa2` / `smaa` / `fxaa` | AA 方式 |
+| `weight_mode` | string | `"inverted"` | `center` / `inverted` / `whole` | 重み場のモード |
+| `center` | [x, y] | `[0.5, 0.5]` | 各 0.0〜1.0 | 重み場の中心（眼テクスチャ UV）。両眼共通 |
+| `center_offset` | number | `0.0` | -0.20〜0.20 | 眼ごとの x 補正。左眼は `-offset`、右眼は `+offset` |
+| `radius` | number | `0.35` | 0.0〜1.0 | 重み場の内側境界 |
+| `feather` | number | `0.10` | 0.0〜1.0 | `radius` の外側への遷移幅 |
+| `strength` | number | `1.0` | 0.0〜1.0 | AA 結果と元画像の混合比 |
+| `preserve_alpha` | bool | `true` | — | alpha < 0.999 のピクセルを変更しない |
+| `fxaa_quality` | string | `"quality"` | `performance` / `balanced` / `quality` | FXAA の探索品質 |
+| `smaa_threshold` | number | `0.1` | 0.05〜0.2 | SMAA のエッジ検出閾値 |
+| `compare` | bool | `false` | — | `compare_interval_ms` ごとに AA の on/off を切り替える |
+| `compare_interval_ms` | integer | `2000` | 500〜10000 | A/B 比較の切り替え周期 |
+| `show_region` | bool | `false` | — | `radius` の等高線を表示（`center` / `inverted` のみ） |
+| `auto_scale` | bool | `false` | — | ゲーム側の描画倍率の自動調整。AA とは別 |
+| `min_scale` | number | `0.5` | 0.1〜4.0 | `auto_scale` の下限 |
+| `max_scale` | number | `1.5` | 0.1〜4.0 | `auto_scale` の上限 |
 
-## プリセット
+`min_scale` が `max_scale` より大きい場合は入れ替えて解釈します。
 
-| プリセット | 基礎リサンプル | 強調 | 備考 |
-|---|---|---|---|
-| `fast` | バイリニア | 重み付き簡易シャープ | 最も軽い |
-| `balanced` | SGSR 1（全面） | 重み付き適応シャープニング | 既定 |
-| `fsr` | FSR 1 EASU | 重み付き RCAS | AA＋トーンマップ済みの入力が前提 |
-| `ml` | FSR 1 EASU | 学習モデル（残差 CNN）の残差＋重み付き RCAS | モデルと DP4A が必要 |
+## 重み場
 
-フォールバック（いずれもゲームはそのまま動作します）:
+`d` は `center` からのアスペクト補正付き放射距離です。`w` は `strength` を掛ける前の AA 重みです。
 
-- `ml` でモデルが無い・読み込めない場合は `fsr` に落ちます
-- `ml` で DP4A（`shaderIntegerDotProduct`）が使えない場合は `fsr` に落ちます
-- `balanced`（SGSR 1）は、テクスチャの bounds が反転している場合は `fast` に落ちます
-- 強調処理そのものに失敗した場合は、アップスケールなしで元のフレームが提出されます
+| モード | 式 | 意味 |
+|---|---|---|
+| `center` | `w = 1 - smoothstep(radius, radius + feather, d)` | 中心で最大、外側で0 |
+| `inverted` | `w = smoothstep(radius, radius + feather, d)` | 中心は0、周辺で最大 |
+| `whole` | `w = 1.0` | 全面一様 |
 
-## 重み場（強調のかかり方）
+- `feather = 0` のときは `radius` で hard step になります
+- `whole` では `center` / `center_offset` / `radius` / `feather` を無視します
+- `show_region` は `center` / `inverted` で `radius` の等高線を描き、`whole` では描きません
 
-強調はゾーン分けではなく、中心からの距離で連続的に決まります。
+## 動作
 
-```
-d = center からの放射距離（歪み補正前の UV 空間、アスペクト補正付き）
-w = 1 - smoothstep(radius, radius + feather, d)
-```
+- 出力解像度は常に入力と同じです。アップスケーリングは行いません
+- `antialias = off` では AA パスを実行しません
+- 方式が使えない場合は `cmaa2 -> fxaa`、`smaa -> fxaa`、`fxaa -> off` の順でフォールバックします
+- `compare` は AA の効果だけを on/off します。画像サイズや他の設定は変わりません
+- `preserve_alpha` は alpha < 0.999 のピクセルを元のまま保持します
+- AA はゲームのプロジェクションレイヤーにだけ適用され、オーバーレイには適用されません
 
-- 強調量は `w × strength` で、ML の残差・RCAS・適応シャープニングにだけ掛かります
-- 基礎リサンプルは重みに関係なく全面に適用されます。重み 0 の場所も画像は完成しています
-- 画面全体を強調したい場合は `radius` を大きくします（`2.0` で実質全面）。全体モードという別設定はありません
-- ML の計算は `w` が 0 でない範囲の外接矩形に限定されます
+## 廃止キー
 
-## Vulkan レイヤー（`ml` プリセット用）
+次のキーは v1 では読みません。設定アプリは未知キーとして保持し、新規に書き込みません。
 
-`ml` の DP4A 経路には、ゲーム（DXVK）が作る Vulkan デバイスへ `shaderIntegerDotProduct` 等を追加で有効化する implicit layer が必要です。`fast`／`balanced`／`fsr` には不要です。
-
-```sh
-# 導入（ユーザーディレクトリへ。Steam Linux Runtime ではこちらを推奨）
-scripts/install-vulkan-layer.sh --user
-# 削除
-scripts/install-vulkan-layer.sh --remove
-
-# 有効化（ゲームの起動オプション等に設定）
-XRIZER_UPSCALER_VK_LAYER=1 %command%
-
-# 無効化（有効化変数があっても必ず無効になります）
-XRIZER_UPSCALER_VK_LAYER_DISABLE=1
-```
-
-- レイヤーは `vkCreateDevice` の横取りのみを行い、ドライバが対応しない機能は追加しません。失敗時は素通しし、ゲームの起動を妨げません
-- 読み込まれたかは `VK_LOADER_DEBUG=layer` の出力で `VK_LAYER_XRIZER_upscaler` を確認できます
-
-## 設定例
-
-中心だけを SGSR 1 で強調する（既定に近い構成）:
-
-```json
-{
-  "enabled": true,
-  "preset": "balanced",
-  "center": [0.5, 0.5],
-  "radius": 0.35,
-  "feather": 0.10,
-  "strength": 1.0
-}
-```
-
-全面を FSR 1 で処理する:
-
-```json
-{
-  "enabled": true,
-  "preset": "fsr",
-  "radius": 2.0,
-  "strength": 1.0
-}
-```
+- `preset`
+- `output_scale`
+- `model_path`
+- ML モデル／ML プリセット関連キー
+- `antialias_stage`
 
 ## 注意事項
 
-- 実験的機能です。RX 7900 XTX＋VRChat／DXVK＋HMD での実機検証は未実施です
-- `ml` のモデルは学習済みデータが別途必要です。同梱のモデルは動作確認用の小規模な構成です
-- 性能の目安と計測方法は `docs/upscaler-benchmark.md` を参照してください
+- 実験的機能です。実機検証は RX 7900 XTX + VRChat／Proton を想定しています
+- MSAA 提出は既存の resolve 経路を使います。AA はシングルサンプル時のみです
+- `auto_scale` はゲーム側の `xrizer_scale` を調整する機能で、AA の解像度とは無関係です
