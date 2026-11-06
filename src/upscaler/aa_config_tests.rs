@@ -33,6 +33,18 @@ fn default_config_is_aa_only() {
 }
 
 #[test]
+fn contract_aa_default_matches_runtime_defaults() {
+    let text = include_str!("../../tests/fixtures/settings-v1/aa-default.json");
+    let contract = serde_json::from_str::<UpscalerConfig>(text)
+        .unwrap()
+        .sanitized();
+    let mut expected = contract;
+    // B1b temporary: the final contract default is cmaa2; B2 flips this.
+    expected.antialias = AntialiasMethod::Fxaa;
+    assert_eq!(UpscalerConfig::default(), expected);
+}
+
+#[test]
 fn params_carry_fxaa_quality() {
     let c = UpscalerConfig {
         enabled: true,

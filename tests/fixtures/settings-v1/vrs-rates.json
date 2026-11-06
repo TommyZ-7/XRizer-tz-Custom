@@ -1,0 +1,5 @@
+{
+  "allowed_rates": ["1x1", "1x2", "2x1", "2x2", "2x4", "4x2", "4x4"],
+  "radv_gfx11_supported": ["1x1", "1x2", "2x1", "2x2"],
+  "msaa_coarse_sample_counts": [1, 2, 4]
+}
