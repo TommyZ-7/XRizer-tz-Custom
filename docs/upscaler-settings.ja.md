@@ -23,7 +23,7 @@ XRizer の実験的空間アップスケーラの設定リファレンスです�
 | `output_scale` | number | `1.0` | 0.5〜2.0 | 出力解像度の倍率。ランタイム推奨サイズに対して乗算されます |
 | `preserve_alpha` | bool | `true` | — | 半透明ピクセル（alpha < 0.999）を強調せずそのまま保持します |
 | `compare` | bool | `false` | — | 2秒ごとに強調の有効／無効を切り替える A/B 比較用。基礎リサンプルは常に有効です |
-| `show_region` | bool | `false` | — | `radius` の等高線（重み最大の境界）を画面に描きます。最終パスが描くため、`compare` の off 区間では表示されません。調整用です |
+| `show_region` | bool | `false` | — | `radius` の等高線（重み最大の境界）を画面に描きます。最終パスが描くため、`compare` の off 区間や `strength=0` では表示されません。調整用です |
 | `model_path` | string／null | `null` | — | `ml` プリセットのモデル（XRU1 形式）のパス。`null` の場合は `~/.config/xrizer/upscaler_model.xru` |
 | `auto_scale` | bool | `false` | — | フレーム時間を見て、ゲーム側のスーパーサンプル倍率を自動調整します |
 | `min_scale` | number | `0.5` | 0.1〜4.0 | `auto_scale` の倍率の下限 |
@@ -38,7 +38,7 @@ XRizer の実験的空間アップスケーラの設定リファレンスです�
 | `fsr` | FSR 1 EASU | 重み付き RCAS | AA＋トーンマップ済みの入力が前提 |
 | `ml` | FSR 1 EASU | 学習モデル（残差 CNN）の残差＋重み付き RCAS | モデルと DP4A が必要 |
 
-`balanced` は SGSR 1 の出力を中間画像に書き、その後段で RCAS を適用する 2 パス構成です。`compare` の off 区間は RCAS が SGSR の出力をそのまま返します（基礎リサンプルは常に有効）。`show_region` の等高線は最終パス（RCAS）が描くため、`compare` の off 区間では表示されません（`fast`/`fsr` と同じ）。
+`balanced` は SGSR 1 の出力を中間画像に書き、その後段で RCAS を適用する 2 パス構成です。`compare` の off 区間は RCAS が SGSR の出力をそのまま返します（基礎リサンプルは常に有効）。`show_region` の等高線は最終パス（RCAS）が描くため、`compare` の off 区間や `strength=0` では表示されません（`fast`/`fsr` と同じ）。
 
 フォールバック（いずれもゲームはそのまま動作します）:
 
