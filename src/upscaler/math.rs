@@ -1,6 +1,6 @@
-//! CPU reference math for the spatial upscaler.
+//! CPU reference math for the AA weight field.
 
-pub const MLP_FEATURE_COUNT: usize = 28;
+use super::WeightMode;
 
 /// GLSL-compatible smoothstep. `edge0 > edge1` produces a descending ramp.
 /// A zero-width edge is treated as a hard step: below is 1, above is 0, and
@@ -19,166 +19,64 @@ pub fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
-/// Continuous radial weight in aspect-corrected UV space.
-pub fn weight_at(uv: [f32; 2], center: [f32; 2], radius: f32, feather: f32, aspect: f32) -> f32 {
+fn radial_distance(uv: [f32; 2], center: [f32; 2], aspect: f32) -> f32 {
     let dx = (uv[0] - center[0]) * aspect;
     let dy = uv[1] - center[1];
-    let distance = (dx * dx + dy * dy).sqrt();
-    if feather <= 0.0 {
-        return if distance <= radius { 1.0 } else { 0.0 };
-    }
-    1.0 - smoothstep(radius, radius + feather, distance)
+    (dx * dx + dy * dy).sqrt()
 }
 
-/// Flatten the 5x5 luma patch plus sub-pixel phase and scale into the 28
-/// features consumed by the per-pixel MLP baseline.
-pub fn extract_luma_features(
-    patch: &[f32; 25],
-    phase: [f32; 2],
-    scale: f32,
-) -> [f32; MLP_FEATURE_COUNT] {
-    let mut features = [0.0; MLP_FEATURE_COUNT];
-    features[..25].copy_from_slice(patch);
-    features[25] = phase[0];
-    features[26] = phase[1];
-    features[27] = scale;
-    features
+/// Continuous radial weight in aspect-corrected UV space. This is the
+/// original `center` mode: maximum at the centre and zero outside the field.
+#[allow(dead_code)]
+pub fn weight_at(uv: [f32; 2], center: [f32; 2], radius: f32, feather: f32, aspect: f32) -> f32 {
+    weight_at_mode(uv, center, radius, feather, aspect, WeightMode::Center)
 }
 
-/// Symmetric residual clamp. `NaN` residuals become zero so a broken model
-/// cannot poison the base image.
-pub fn residual_clamp(residual: f32, limit: f32) -> f32 {
-    if residual.is_nan() {
-        return 0.0;
-    }
-    let limit = if limit.is_nan() { 0.0 } else { limit.abs() };
-    residual.clamp(-limit, limit)
-}
-
-/// Clamp a residual to a fraction of the local luma range. Flat areas allow
-/// no residual at all, which keeps gradients and UI backgrounds stable.
-pub fn local_residual_clamp(residual: f32, local_min: f32, local_max: f32, fraction: f32) -> f32 {
-    let range = (local_max - local_min).abs();
-    residual_clamp(residual, range * fraction.abs())
-}
-
-/// FSR 1 EASU constants. The shader expects perceptual/gamma-space input, so
-/// callers sample an sRGB view and convert as documented by AMD.
-pub fn fsr_easu_con(
-    source_width: u32,
-    source_height: u32,
-    dst_width: u32,
-    dst_height: u32,
-    bounds: [f32; 4],
-) -> [u32; 16] {
-    if source_width == 0 || source_height == 0 || dst_width == 0 || dst_height == 0 {
-        return [0; 16];
-    }
-    let u_min = bounds[0].min(bounds[2]);
-    let v_min = bounds[1].min(bounds[3]);
-    let viewport_width = (bounds[2] - bounds[0]).abs() * source_width as f32;
-    let viewport_height = (bounds[3] - bounds[1]).abs() * source_height as f32;
-    if viewport_width <= 0.0 || viewport_height <= 0.0 {
-        return [0; 16];
-    }
-
-    let mut con = [0u32; 16];
-    con[0] = (viewport_width / dst_width as f32).to_bits();
-    con[1] = (viewport_height / dst_height as f32).to_bits();
-    con[2] =
-        (0.5 * viewport_width / dst_width as f32 - 0.5 + u_min * source_width as f32).to_bits();
-    con[3] =
-        (0.5 * viewport_height / dst_height as f32 - 0.5 + v_min * source_height as f32).to_bits();
-    con[4] = (1.0 / source_width as f32).to_bits();
-    con[5] = (1.0 / source_height as f32).to_bits();
-    con[6] = (1.0 / source_width as f32).to_bits();
-    con[7] = (-1.0 / source_height as f32).to_bits();
-    con[8] = (-1.0 / source_width as f32).to_bits();
-    con[9] = (2.0 / source_height as f32).to_bits();
-    con[10] = (1.0 / source_width as f32).to_bits();
-    con[11] = (2.0 / source_height as f32).to_bits();
-    con[12] = 0;
-    con[13] = (4.0 / source_height as f32).to_bits();
-    con[14] = 0;
-    con[15] = 0;
-    con
-}
-
-/// Bounding box of pixels with `weight > epsilon`, in output pixels.
-///
-/// The returned rectangle is clamped to the frame. A field that covers the
-/// whole frame returns the whole extent, which lets callers dispatch the ML
-/// pass over everything without a special case.
-pub fn ml_bounds(
-    dst_width: u32,
-    dst_height: u32,
+/// Weight for one of the three AA field modes.
+pub fn weight_at_mode(
+    uv: [f32; 2],
     center: [f32; 2],
     radius: f32,
     feather: f32,
-    epsilon: f32,
-) -> (u32, u32, u32, u32) {
-    let effective_radius = radius + feather;
-    if effective_radius <= epsilon || dst_width == 0 || dst_height == 0 {
-        return (0, 0, 0, 0);
+    aspect: f32,
+    mode: WeightMode,
+) -> f32 {
+    if mode == WeightMode::Whole {
+        return 1.0;
     }
 
-    let aspect = dst_width as f32 / dst_height as f32;
-    let half_u = effective_radius / aspect;
-    let half_v = effective_radius;
+    let distance = radial_distance(uv, center, aspect);
+    if feather <= 0.0 {
+        let inside = distance <= radius;
+        return match mode {
+            WeightMode::Center => {
+                if inside {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            WeightMode::Inverted => {
+                if inside {
+                    0.0
+                } else {
+                    1.0
+                }
+            }
+            WeightMode::Whole => 1.0,
+        };
+    }
 
-    // Absorb float representation error at exact pixel boundaries (for
-    // example 0.5 - 0.3 landing just below 0.2).
-    const PIXEL_NUDGE: f32 = 1e-3;
-    let x0 = ((center[0] - half_u) * dst_width as f32 + PIXEL_NUDGE).floor();
-    let x1 = ((center[0] + half_u) * dst_width as f32 - PIXEL_NUDGE).ceil();
-    let y0 = ((center[1] - half_v) * dst_height as f32 + PIXEL_NUDGE).floor();
-    let y1 = ((center[1] + half_v) * dst_height as f32 - PIXEL_NUDGE).ceil();
-
-    let x0 = x0.clamp(0.0, dst_width as f32) as u32;
-    let x1 = x1.clamp(0.0, dst_width as f32) as u32;
-    let y0 = y0.clamp(0.0, dst_height as f32) as u32;
-    let y1 = y1.clamp(0.0, dst_height as f32) as u32;
-
-    (x0, y0, x1.saturating_sub(x0), y1.saturating_sub(y0))
+    match mode {
+        WeightMode::Center => 1.0 - smoothstep(radius, radius + feather, distance),
+        WeightMode::Inverted => smoothstep(radius, radius + feather, distance),
+        WeightMode::Whole => 1.0,
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn luma_patch_has_28_features() {
-        let patch = [
-            0.0, 0.1, 0.2, 0.3, 0.4, //
-            0.5, 0.6, 0.7, 0.8, 0.9, //
-            1.0, 0.9, 0.8, 0.7, 0.6, //
-            0.5, 0.4, 0.3, 0.2, 0.1, //
-            0.0, 0.1, 0.2, 0.3, 0.4,
-        ];
-        let features = extract_luma_features(&patch, [0.25, -0.5], 1.5);
-        assert_eq!(features.len(), MLP_FEATURE_COUNT);
-        assert_eq!(features[..25], patch);
-        assert_eq!(features[25], 0.25);
-        assert_eq!(features[26], -0.5);
-        assert_eq!(features[27], 1.5);
-    }
-
-    #[test]
-    fn residual_clamp_is_symmetric_and_bounded() {
-        assert_eq!(residual_clamp(0.5, 0.2), 0.2);
-        assert_eq!(residual_clamp(-0.5, 0.2), -0.2);
-        assert_eq!(residual_clamp(0.1, 0.2), 0.1);
-        assert_eq!(residual_clamp(0.5, f32::INFINITY), 0.5);
-        assert_eq!(residual_clamp(f32::NAN, 0.2), 0.0);
-    }
-
-    #[test]
-    fn local_residual_clamp_respects_local_contrast() {
-        assert_eq!(local_residual_clamp(0.1, 0.5, 0.5, 0.2), 0.0);
-        assert_eq!(local_residual_clamp(0.1, 0.0, 1.0, 0.2), 0.1);
-        assert_eq!(local_residual_clamp(0.5, 0.0, 1.0, 0.2), 0.2);
-        assert_eq!(local_residual_clamp(-0.5, 0.0, 1.0, 0.2), -0.2);
-    }
 
     #[test]
     fn smoothstep_matches_glsl_formula() {
@@ -194,7 +92,44 @@ mod tests {
     }
 
     #[test]
-    fn weight_field_is_smooth_and_reaches_zero() {
+    fn center_mode_matches_the_existing_field() {
+        let center = [0.5, 0.5];
+        assert_eq!(
+            weight_at_mode([0.5, 0.5], center, 0.2, 0.1, 1.0, WeightMode::Center),
+            1.0
+        );
+        assert_eq!(
+            weight_at_mode([0.9, 0.5], center, 0.2, 0.1, 1.0, WeightMode::Center),
+            0.0
+        );
+    }
+
+    #[test]
+    fn inverted_mode_is_zero_in_the_centre_and_one_outside() {
+        let center = [0.5, 0.5];
+        assert_eq!(
+            weight_at_mode([0.5, 0.5], center, 0.2, 0.1, 1.0, WeightMode::Inverted),
+            0.0
+        );
+        assert_eq!(
+            weight_at_mode([0.9, 0.5], center, 0.2, 0.1, 1.0, WeightMode::Inverted),
+            1.0
+        );
+    }
+
+    #[test]
+    fn whole_mode_is_one_everywhere() {
+        let center = [0.5, 0.5];
+        for uv in [[0.0, 0.0], [0.5, 0.5], [1.0, 1.0]] {
+            assert_eq!(
+                weight_at_mode(uv, center, 0.2, 0.1, 1.0, WeightMode::Whole),
+                1.0
+            );
+        }
+    }
+
+    #[test]
+    fn weight_field_is_smooth_and_monotonic_in_center_mode() {
         let center = [0.5, 0.5];
         let radius = 0.2;
         let feather = 0.1;
@@ -211,25 +146,5 @@ mod tests {
             previous = w;
         }
         assert_eq!(weight_at([0.9, 0.5], center, radius, feather, aspect), 0.0);
-    }
-
-    #[test]
-    fn ml_bounds_round_and_clamp() {
-        let (x, y, w, h) = ml_bounds(1000, 1000, [0.5, 0.5], 0.2, 0.1, 0.001);
-        assert_eq!((x, y, w, h), (200, 200, 600, 600));
-
-        let (x, y, w, h) = ml_bounds(100, 100, [0.05, 0.95], 0.3, 0.1, 0.001);
-        assert_eq!(x, 0);
-        assert_eq!(y + h, 100);
-        assert!(w <= 100 && h <= 100);
-
-        let (x, y, w, h) = ml_bounds(320, 200, [0.5, 0.5], 2.0, 0.0, 0.001);
-        assert_eq!((x, y, w, h), (0, 0, 320, 200));
-    }
-
-    #[test]
-    fn ml_bounds_respects_aspect_correction() {
-        let (x, y, w, h) = ml_bounds(200, 100, [0.5, 0.5], 0.2, 0.0, 0.001);
-        assert_eq!((x, y, w, h), (80, 30, 40, 40));
     }
 }

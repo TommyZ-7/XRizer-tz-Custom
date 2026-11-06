@@ -255,8 +255,8 @@ impl CaptureState {
             eye: "both".to_string(),
             session_started_unix_ms: now_unix_ms(),
             render_scale: crate::settings::current_supersample_scale(),
-            output_scale: crate::upscaler::snapshot().output_scale,
-            preset: format!("{:?}", crate::upscaler::snapshot().preset).to_lowercase(),
+            output_scale: 1.0,
+            preset: format!("{:?}", crate::upscaler::snapshot().antialias).to_lowercase(),
             mode: format!("{:?}", config.mode).to_lowercase(),
             frames: Vec::new(),
         });
@@ -1198,9 +1198,6 @@ pub fn color_space_name(color_space: vr::EColorSpace) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn scan_next_index_skips_existing_pairs() {

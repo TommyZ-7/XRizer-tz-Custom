@@ -55,10 +55,12 @@ impl AutoScaleController {
         }
     }
 
+    #[allow(dead_code)]
     pub fn scale(&self) -> f32 {
         self.scale
     }
 
+    #[allow(dead_code)]
     pub fn set_scale(&mut self, scale: f32) {
         self.scale = scale.clamp(0.1, 4.0);
         self.slow_frames = 0;

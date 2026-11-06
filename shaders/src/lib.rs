@@ -16,16 +16,6 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
         ("overlay.frag", "frag_overlay.spv"),
         ("upscaler.vert", "vert_upscaler.spv"),
         ("upscaler.frag", "frag_upscaler.spv"),
-        ("fast.frag", "frag_fast.spv"),
-        ("fsr_easu.frag", "frag_fsr_easu.spv"),
-        ("enhance.frag", "frag_enhance.spv"),
-        ("sgsr1.frag", "frag_sgsr1.spv"),
-        ("mlp_dp4a.comp", "comp_mlp_dp4a.spv"),
-        ("ml_bench.comp", "comp_ml_bench.spv"),
-        ("ml_bench_coopmat.comp", "comp_ml_bench_coopmat.spv"),
-        ("residual_cnn.comp", "comp_residual_cnn.spv"),
-        ("srpo.comp", "comp_srpo.spv"),
-        ("dp4a_probe.comp", "comp_dp4a_probe.spv"),
         ("capture.vert", "vert_capture.spv"),
         ("capture.frag", "frag_capture.spv"),
     ];
@@ -39,10 +29,7 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
 
     let shader_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
     let out_dir = PathBuf::from(out_dir);
-    let headers: Vec<PathBuf> = ["ffx_a.h", "ffx_fsr1.h"]
-        .into_iter()
-        .map(|header| shader_dir.join(header))
-        .collect();
+    let headers: Vec<PathBuf> = Vec::new();
     for (source, output) in shaders {
         let source = shader_dir.join(source);
         let output = out_dir.join(output);

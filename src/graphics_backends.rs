@@ -46,11 +46,6 @@ pub trait GraphicsBackend: Into<SupportedBackend> {
         false
     }
 
-    /// Whether this backend can run the ML preset with the current device.
-    fn supports_ml_upscaler(&self) -> bool {
-        false
-    }
-
     /// Prepare cached views of application-owned source images for a frame.
     /// Called on the first eye before either eye records a copy; the backend
     /// clears its cache when `input_extent` changed or the cache is full.
