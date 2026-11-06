@@ -1,5 +1,10 @@
 # Upscaler capture and training dataset
 
+> **Historical:** this guide was written for the pre-B1a spatial upscaler.
+> The current build is AA-only. Capture metadata now reports `output_scale:
+> 1.0` and the AA method in the legacy `preset` field; ML/preset-specific
+> instructions below are retained only for old datasets.
+
 This directory is for **user-provided** captures. Captures, derived frames, and
 trained `*.xru` models are git-ignored. Do not commit VRChat content, avatar
 names, user IDs, headset serials, IP addresses, or absolute paths.
