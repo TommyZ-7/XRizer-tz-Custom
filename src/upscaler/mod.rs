@@ -83,7 +83,8 @@ impl Default for UpscalerConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            antialias: AntialiasMethod::Cmaa2,
+            // B1b temporary default. B2 flips this to Cmaa2.
+            antialias: AntialiasMethod::Fxaa,
             weight_mode: WeightMode::Inverted,
             center: [0.5, 0.5],
             center_offset: 0.0,
@@ -170,6 +171,7 @@ impl UpscalerConfig {
             src_bounds: bounds,
             antialias: config.antialias,
             weight_mode: config.weight_mode,
+            fxaa_quality: config.fxaa_quality,
             preserve_alpha: config.preserve_alpha,
             show_region: config.show_region,
             enabled: compare_enabled,
@@ -198,6 +200,7 @@ pub struct UpscalerParams {
     pub src_bounds: vr::VRTextureBounds_t,
     pub antialias: AntialiasMethod,
     pub weight_mode: WeightMode,
+    pub fxaa_quality: FxaaQuality,
     pub preserve_alpha: bool,
     pub show_region: bool,
     pub enabled: bool,
@@ -218,6 +221,7 @@ impl PartialEq for UpscalerParams {
             && self.src_bounds.vMax == other.src_bounds.vMax
             && self.antialias == other.antialias
             && self.weight_mode == other.weight_mode
+            && self.fxaa_quality == other.fxaa_quality
             && self.preserve_alpha == other.preserve_alpha
             && self.show_region == other.show_region
             && self.enabled == other.enabled

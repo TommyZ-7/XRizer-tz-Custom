@@ -14,7 +14,7 @@ fn full_bounds() -> vr::VRTextureBounds_t {
 fn default_config_is_aa_only() {
     let c = UpscalerConfig::default();
     assert!(!c.enabled);
-    assert_eq!(c.antialias, AntialiasMethod::Cmaa2);
+    assert_eq!(c.antialias, AntialiasMethod::Fxaa);
     assert_eq!(c.weight_mode, WeightMode::Inverted);
     assert_eq!(c.center, [0.5, 0.5]);
     assert_eq!(c.center_offset, 0.0);
@@ -30,6 +30,30 @@ fn default_config_is_aa_only() {
     assert!(!c.auto_scale);
     assert_eq!(c.min_scale, 0.5);
     assert_eq!(c.max_scale, 1.5);
+}
+
+#[test]
+fn params_carry_fxaa_quality() {
+    let c = UpscalerConfig {
+        enabled: true,
+        fxaa_quality: FxaaQuality::Balanced,
+        ..Default::default()
+    };
+    let p = c.params_for_size(100, 100, full_bounds()).unwrap();
+    assert_eq!(p.fxaa_quality, FxaaQuality::Balanced);
+}
+
+#[test]
+fn parse_all_fxaa_qualities() {
+    for (quality, expected) in [
+        ("performance", FxaaQuality::Performance),
+        ("balanced", FxaaQuality::Balanced),
+        ("quality", FxaaQuality::Quality),
+    ] {
+        let text = format!(r#"{{"fxaa_quality":"{quality}"}}"#);
+        let c: UpscalerConfig = serde_json::from_str(&text).unwrap();
+        assert_eq!(c.fxaa_quality, expected);
+    }
 }
 
 #[test]
@@ -49,7 +73,7 @@ fn legacy_upscaling_keys_are_ignored() {
     )
     .unwrap();
     assert!(c.enabled);
-    assert_eq!(c.antialias, AntialiasMethod::Cmaa2);
+    assert_eq!(c.antialias, AntialiasMethod::Fxaa);
 }
 
 #[test]
@@ -227,7 +251,7 @@ fn json_roundtrip_and_bad_json_is_error() {
 fn missing_fields_use_defaults() {
     let c: UpscalerConfig = serde_json::from_str("{\"enabled\":true}").unwrap();
     assert!(c.enabled);
-    assert_eq!(c.antialias, AntialiasMethod::Cmaa2);
+    assert_eq!(c.antialias, AntialiasMethod::Fxaa);
     assert_eq!(c.weight_mode, WeightMode::Inverted);
     assert_eq!(c.radius, 0.35);
 }
