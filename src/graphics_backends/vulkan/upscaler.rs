@@ -25,6 +25,20 @@ struct PushConstants {
     ml_size: [u32; 2],
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BalancedRoute {
+    SgsrThenRcas,
+    Fast,
+}
+
+fn balanced_route(has_flipped_bounds: bool) -> BalancedRoute {
+    if has_flipped_bounds {
+        BalancedRoute::Fast
+    } else {
+        BalancedRoute::SgsrThenRcas
+    }
+}
+
 pub struct UpscalerPipeline {
     passthrough_pipeline: vk::Pipeline,
     fast_pipeline: vk::Pipeline,
@@ -654,8 +668,10 @@ impl UpscalerPipeline {
             } else {
                 let pipeline = match params.preset {
                     UpscalerPreset::Fast => self.fast_pipeline,
-                    UpscalerPreset::Balanced if !params.has_flipped_bounds() => self.sgsr_pipeline,
-                    UpscalerPreset::Balanced => self.fast_pipeline,
+                    UpscalerPreset::Balanced => match balanced_route(params.has_flipped_bounds()) {
+                        BalancedRoute::SgsrThenRcas => self.sgsr_pipeline,
+                        BalancedRoute::Fast => self.fast_pipeline,
+                    },
                     UpscalerPreset::Fsr | UpscalerPreset::Ml => self.passthrough_pipeline,
                 };
                 device.cmd_begin_render_pass(
@@ -1508,5 +1524,11 @@ mod tests {
         assert!(format_is_srgb(vk::Format::B8G8R8A8_SRGB));
         assert!(!format_is_srgb(vk::Format::R8G8B8A8_UNORM));
         assert!(!format_is_srgb(vk::Format::B8G8R8A8_UNORM));
+    }
+
+    #[test]
+    fn balanced_route_uses_sgsr_then_rcas_unless_flipped() {
+        assert_eq!(balanced_route(false), BalancedRoute::SgsrThenRcas);
+        assert_eq!(balanced_route(true), BalancedRoute::Fast);
     }
 }
