@@ -8,6 +8,7 @@ use ash::vk;
 use log::warn;
 
 #[repr(C)]
+#[derive(Clone, Copy)]
 struct PushConstants {
     src_bounds: [f32; 4],
     center: [f32; 2],
@@ -37,6 +38,12 @@ fn balanced_route(has_flipped_bounds: bool) -> BalancedRoute {
     } else {
         BalancedRoute::SgsrThenRcas
     }
+}
+
+/// The SGSR pass writes into the sRGB intermediate, so it must not apply the
+/// manual UNORM gamma encoding used for a non-sRGB swapchain.
+fn sgsr_intermediate_flags(flags: u32) -> u32 {
+    flags & !FLAG_OUTPUT_UNORM
 }
 
 pub struct UpscalerPipeline {
@@ -281,8 +288,13 @@ impl UpscalerPipeline {
                 vertex_module,
                 rcas_module,
             )?;
-            let sgsr_pipeline =
-                create_graphics_pipeline(device, render_pass, layout, vertex_module, sgsr_module)?;
+            let sgsr_pipeline = create_graphics_pipeline(
+                device,
+                easu_render_pass,
+                layout,
+                vertex_module,
+                sgsr_module,
+            )?;
             device.destroy_shader_module(vertex_module, None);
             device.destroy_shader_module(passthrough_module, None);
             device.destroy_shader_module(fast_module, None);
@@ -595,30 +607,7 @@ impl UpscalerPipeline {
                 device.cmd_draw(command_buffer, 3, 1, 0, 0);
                 device.cmd_end_render_pass(command_buffer);
 
-                device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER
-                        | vk::PipelineStageFlags::COMPUTE_SHADER,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[vk::ImageMemoryBarrier {
-                        src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
-                        dst_access_mask: vk::AccessFlags::SHADER_READ,
-                        old_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        image: self.intermediate_image,
-                        subresource_range: vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: eye as u32,
-                            layer_count: 1,
-                        },
-                        ..Default::default()
-                    }],
-                );
+                self.barrier_intermediate_read(device, command_buffer, eye);
 
                 let mut ml_output = None;
                 if use_ml {
@@ -630,48 +619,27 @@ impl UpscalerPipeline {
                 }
                 let rcas_set = ml_output.unwrap_or(self.rcas_fsr_sets[eye]);
 
-                device.cmd_begin_render_pass(
+                self.record_rcas_output(device, command_buffer, image_index, eye, &push, rcas_set);
+            } else if params.preset == UpscalerPreset::Balanced
+                && balanced_route(params.has_flipped_bounds()) == BalancedRoute::SgsrThenRcas
+            {
+                let mut sgsr_push = push;
+                sgsr_push.flags = sgsr_intermediate_flags(push.flags);
+                self.record_sgsr_intermediate(device, command_buffer, eye, &sgsr_push);
+                self.barrier_intermediate_read(device, command_buffer, eye);
+                self.record_rcas_output(
+                    device,
                     command_buffer,
-                    &vk::RenderPassBeginInfo::default()
-                        .render_pass(self.render_pass)
-                        .framebuffer(self.framebuffers[image_index][eye])
-                        .render_area(render_area),
-                    vk::SubpassContents::INLINE,
+                    image_index,
+                    eye,
+                    &push,
+                    self.rcas_fsr_sets[eye],
                 );
-                device.cmd_bind_pipeline(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.rcas_pipeline,
-                );
-                device.cmd_set_viewport(command_buffer, 0, std::slice::from_ref(&viewport));
-                device.cmd_set_scissor(command_buffer, 0, std::slice::from_ref(&render_area));
-                device.cmd_bind_descriptor_sets(
-                    command_buffer,
-                    vk::PipelineBindPoint::GRAPHICS,
-                    self.rcas_layout,
-                    0,
-                    &[rcas_set],
-                    &[],
-                );
-                device.cmd_push_constants(
-                    command_buffer,
-                    self.rcas_layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                    0,
-                    std::slice::from_raw_parts(
-                        (&raw const push).cast::<u8>(),
-                        std::mem::size_of::<PushConstants>(),
-                    ),
-                );
-                device.cmd_draw(command_buffer, 3, 1, 0, 0);
-                device.cmd_end_render_pass(command_buffer);
             } else {
+                // Non-flipped balanced is handled by the SGSR -> RCAS branch above.
                 let pipeline = match params.preset {
                     UpscalerPreset::Fast => self.fast_pipeline,
-                    UpscalerPreset::Balanced => match balanced_route(params.has_flipped_bounds()) {
-                        BalancedRoute::SgsrThenRcas => self.sgsr_pipeline,
-                        BalancedRoute::Fast => self.fast_pipeline,
-                    },
+                    UpscalerPreset::Balanced => self.fast_pipeline,
                     UpscalerPreset::Fsr | UpscalerPreset::Ml => self.passthrough_pipeline,
                 };
                 device.cmd_begin_render_pass(
@@ -725,6 +693,163 @@ impl UpscalerPipeline {
                 }],
             );
             Ok(())
+        }
+    }
+
+    unsafe fn record_sgsr_intermediate(
+        &self,
+        device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        eye: usize,
+        push: &PushConstants,
+    ) {
+        let render_area = vk::Rect2D {
+            offset: vk::Offset2D::default(),
+            extent: vk::Extent2D {
+                width: self.width,
+                height: self.height,
+            },
+        };
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: self.width as f32,
+            height: self.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        unsafe {
+            device.cmd_begin_render_pass(
+                command_buffer,
+                &vk::RenderPassBeginInfo::default()
+                    .render_pass(self.easu_render_pass)
+                    .framebuffer(self.intermediate_framebuffers[eye])
+                    .render_area(render_area),
+                vk::SubpassContents::INLINE,
+            );
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.sgsr_pipeline,
+            );
+            device.cmd_set_viewport(command_buffer, 0, std::slice::from_ref(&viewport));
+            device.cmd_set_scissor(command_buffer, 0, std::slice::from_ref(&render_area));
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.layout,
+                0,
+                &[self.source_sets[eye]],
+                &[],
+            );
+            device.cmd_push_constants(
+                command_buffer,
+                self.layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                std::slice::from_raw_parts(
+                    (push as *const PushConstants).cast::<u8>(),
+                    std::mem::size_of::<PushConstants>(),
+                ),
+            );
+            device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            device.cmd_end_render_pass(command_buffer);
+        }
+    }
+
+    unsafe fn barrier_intermediate_read(
+        &self,
+        device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        eye: usize,
+    ) {
+        unsafe {
+            device.cmd_pipeline_barrier(
+                command_buffer,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::FRAGMENT_SHADER | vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[],
+                &[],
+                &[vk::ImageMemoryBarrier {
+                    src_access_mask: vk::AccessFlags::COLOR_ATTACHMENT_WRITE,
+                    dst_access_mask: vk::AccessFlags::SHADER_READ,
+                    old_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    image: self.intermediate_image,
+                    subresource_range: vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: eye as u32,
+                        layer_count: 1,
+                    },
+                    ..Default::default()
+                }],
+            );
+        }
+    }
+
+    unsafe fn record_rcas_output(
+        &self,
+        device: &ash::Device,
+        command_buffer: vk::CommandBuffer,
+        image_index: usize,
+        eye: usize,
+        push: &PushConstants,
+        rcas_set: vk::DescriptorSet,
+    ) {
+        let render_area = vk::Rect2D {
+            offset: vk::Offset2D::default(),
+            extent: vk::Extent2D {
+                width: self.width,
+                height: self.height,
+            },
+        };
+        let viewport = vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: self.width as f32,
+            height: self.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        };
+        unsafe {
+            device.cmd_begin_render_pass(
+                command_buffer,
+                &vk::RenderPassBeginInfo::default()
+                    .render_pass(self.render_pass)
+                    .framebuffer(self.framebuffers[image_index][eye])
+                    .render_area(render_area),
+                vk::SubpassContents::INLINE,
+            );
+            device.cmd_bind_pipeline(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.rcas_pipeline,
+            );
+            device.cmd_set_viewport(command_buffer, 0, std::slice::from_ref(&viewport));
+            device.cmd_set_scissor(command_buffer, 0, std::slice::from_ref(&render_area));
+            device.cmd_bind_descriptor_sets(
+                command_buffer,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.rcas_layout,
+                0,
+                &[rcas_set],
+                &[],
+            );
+            device.cmd_push_constants(
+                command_buffer,
+                self.rcas_layout,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                0,
+                std::slice::from_raw_parts(
+                    (push as *const PushConstants).cast::<u8>(),
+                    std::mem::size_of::<PushConstants>(),
+                ),
+            );
+            device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            device.cmd_end_render_pass(command_buffer);
         }
     }
 
@@ -1517,6 +1642,7 @@ fn format_is_srgb(format: vk::Format) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::upscaler::{FLAG_ENHANCEMENT_ENABLED, FLAG_PRESERVE_ALPHA, FLAG_SHOW_REGION};
 
     #[test]
     fn srgb_format_detection() {
@@ -1530,5 +1656,17 @@ mod tests {
     fn balanced_route_uses_sgsr_then_rcas_unless_flipped() {
         assert_eq!(balanced_route(false), BalancedRoute::SgsrThenRcas);
         assert_eq!(balanced_route(true), BalancedRoute::Fast);
+    }
+
+    #[test]
+    fn sgsr_intermediate_flags_clear_output_unorm() {
+        let flags =
+            FLAG_PRESERVE_ALPHA | FLAG_SHOW_REGION | FLAG_ENHANCEMENT_ENABLED | FLAG_OUTPUT_UNORM;
+        let intermediate = sgsr_intermediate_flags(flags);
+        assert_eq!(intermediate & FLAG_OUTPUT_UNORM, 0);
+        assert_eq!(
+            intermediate,
+            FLAG_PRESERVE_ALPHA | FLAG_SHOW_REGION | FLAG_ENHANCEMENT_ENABLED
+        );
     }
 }

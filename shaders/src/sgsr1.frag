@@ -132,13 +132,6 @@ void main() {
         color.rgb = clamp(color.rgb + delta_y, 0.0, 1.0);
     }
 
-    if ((pc.flags & 2u) != 0u) {
-        float aspect = float(pc.dst_width) / float(pc.dst_height);
-        float distance = length((v_uv - pc.center) * vec2(aspect, 1.0));
-        float ring = 1.0 - smoothstep(0.0, 0.0025, abs(distance - pc.radius));
-        color.rgb = mix(color.rgb, vec3(0.0, 1.0, 0.0), ring * 0.6);
-    }
-
     if ((pc.flags & 16u) == 0u) {
         color.rgb = color.rgb * color.rgb;
     }
