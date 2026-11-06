@@ -39,6 +39,39 @@ fn fxaa_quality_code(quality: crate::upscaler::FxaaQuality) -> u32 {
     }
 }
 
+type CleanupAction<'a> = Box<dyn FnOnce(&ash::Device) + 'a>;
+
+/// Destroys partially-created Vulkan objects when `new` returns early.
+struct Cleanup<'a> {
+    device: &'a ash::Device,
+    actions: Vec<CleanupAction<'a>>,
+}
+
+impl<'a> Cleanup<'a> {
+    fn new(device: &'a ash::Device) -> Self {
+        Self {
+            device,
+            actions: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, action: impl FnOnce(&ash::Device) + 'a) {
+        self.actions.push(Box::new(action));
+    }
+
+    fn disarm(&mut self) {
+        self.actions.clear();
+    }
+}
+
+impl Drop for Cleanup<'_> {
+    fn drop(&mut self) {
+        for action in self.actions.drain(..).rev() {
+            action(self.device);
+        }
+    }
+}
+
 pub struct UpscalerPipeline {
     pipeline: vk::Pipeline,
     layout: vk::PipelineLayout,
@@ -65,6 +98,8 @@ impl UpscalerPipeline {
         height: u32,
     ) -> Result<Self, vk::Result> {
         unsafe {
+            let mut cleanup = Cleanup::new(device);
+            let mut shader_cleanup = Cleanup::new(device);
             let attachment = vk::AttachmentDescription {
                 format: target_format,
                 samples: vk::SampleCountFlags::TYPE_1,
@@ -89,6 +124,7 @@ impl UpscalerPipeline {
                     .subpasses(std::slice::from_ref(&subpass)),
                 None,
             )?;
+            cleanup.push(move |device| unsafe { device.destroy_render_pass(render_pass, None) });
 
             let binding = vk::DescriptorSetLayoutBinding::default()
                 .binding(0)
@@ -100,6 +136,9 @@ impl UpscalerPipeline {
                     .bindings(std::slice::from_ref(&binding)),
                 None,
             )?;
+            cleanup.push(move |device| unsafe {
+                device.destroy_descriptor_set_layout(set_layout, None)
+            });
             let pool = device.create_descriptor_pool(
                 &vk::DescriptorPoolCreateInfo::default()
                     .max_sets(2)
@@ -109,6 +148,7 @@ impl UpscalerPipeline {
                     }]),
                 None,
             )?;
+            cleanup.push(move |device| unsafe { device.destroy_descriptor_pool(pool, None) });
             let sets = device.allocate_descriptor_sets(
                 &vk::DescriptorSetAllocateInfo::default()
                     .descriptor_pool(pool)
@@ -127,15 +167,20 @@ impl UpscalerPipeline {
                     .push_constant_ranges(std::slice::from_ref(&push_constant_range)),
                 None,
             )?;
+            cleanup.push(move |device| unsafe { device.destroy_pipeline_layout(layout, None) });
 
             let vertex_module = create_shader_module(
                 device,
                 &include_bytes!(concat!(env!("OUT_DIR"), "/vert_aa.spv"))[..],
             )?;
+            shader_cleanup
+                .push(move |device| unsafe { device.destroy_shader_module(vertex_module, None) });
             let fragment_module = create_shader_module(
                 device,
                 &include_bytes!(concat!(env!("OUT_DIR"), "/frag_fxaa.spv"))[..],
             )?;
+            shader_cleanup
+                .push(move |device| unsafe { device.destroy_shader_module(fragment_module, None) });
             let pipeline = create_graphics_pipeline(
                 device,
                 render_pass,
@@ -143,8 +188,7 @@ impl UpscalerPipeline {
                 vertex_module,
                 fragment_module,
             )?;
-            device.destroy_shader_module(vertex_module, None);
-            device.destroy_shader_module(fragment_module, None);
+            cleanup.push(move |device| unsafe { device.destroy_pipeline(pipeline, None) });
 
             let sampler = device.create_sampler(
                 &vk::SamplerCreateInfo::default()
@@ -157,6 +201,7 @@ impl UpscalerPipeline {
                     .max_lod(0.0),
                 None,
             )?;
+            cleanup.push(move |device| unsafe { device.destroy_sampler(sampler, None) });
 
             let mut output_views = Vec::with_capacity(images.len());
             let mut framebuffers = Vec::with_capacity(images.len());
@@ -181,6 +226,10 @@ impl UpscalerPipeline {
                             }),
                         None,
                     )?;
+                    let view_handle = *view;
+                    cleanup.push(move |device| unsafe {
+                        device.destroy_image_view(view_handle, None)
+                    });
                     *framebuffer = device.create_framebuffer(
                         &vk::FramebufferCreateInfo::default()
                             .render_pass(render_pass)
@@ -190,10 +239,16 @@ impl UpscalerPipeline {
                             .layers(1),
                         None,
                     )?;
+                    let framebuffer_handle = *framebuffer;
+                    cleanup.push(move |device| unsafe {
+                        device.destroy_framebuffer(framebuffer_handle, None)
+                    });
                 }
                 output_views.push(views);
                 framebuffers.push(buffers);
             }
+
+            cleanup.disarm();
 
             Ok(Self {
                 pipeline,
