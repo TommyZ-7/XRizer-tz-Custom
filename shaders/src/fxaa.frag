@@ -33,6 +33,15 @@ vec2 source_uv(vec2 uv) {
     return mix(pc.src_bounds.xy, pc.src_bounds.zw, uv);
 }
 
+// Keep every tap inside this eye's submitted subrect. Without this, a
+// double-wide texture would sample the other eye at the subrect edge.
+vec4 sample_source(vec2 uv) {
+    vec2 texel = 1.0 / vec2(textureSize(source_tex, 0));
+    vec2 lo = min(pc.src_bounds.xy, pc.src_bounds.zw) + texel * 0.5;
+    vec2 hi = max(pc.src_bounds.xy, pc.src_bounds.zw) - texel * 0.5;
+    return texture(source_tex, clamp(uv, lo, hi));
+}
+
 // Mirrors src/upscaler/math.rs:weight_at_mode.
 float field_weight(vec2 uv) {
     if (pc.weight_mode == 2u) {
@@ -60,13 +69,13 @@ float field_weight(vec2 uv) {
 // fxaa_quality (0 = performance, 1 = balanced, 2 = quality).
 vec3 fxaa(vec2 uv) {
     vec2 texel = 1.0 / vec2(textureSize(source_tex, 0));
-    vec3 rgb_m = texture(source_tex, uv).rgb;
+    vec3 rgb_m = sample_source(uv).rgb;
     float luma_m = luma(rgb_m);
 
-    float luma_n = luma(texture(source_tex, uv + vec2(0.0, -texel.y)).rgb);
-    float luma_s = luma(texture(source_tex, uv + vec2(0.0, texel.y)).rgb);
-    float luma_e = luma(texture(source_tex, uv + vec2(texel.x, 0.0)).rgb);
-    float luma_w = luma(texture(source_tex, uv + vec2(-texel.x, 0.0)).rgb);
+    float luma_n = luma(sample_source(uv + vec2(0.0, -texel.y)).rgb);
+    float luma_s = luma(sample_source(uv + vec2(0.0, texel.y)).rgb);
+    float luma_e = luma(sample_source(uv + vec2(texel.x, 0.0)).rgb);
+    float luma_w = luma(sample_source(uv + vec2(-texel.x, 0.0)).rgb);
 
     float luma_min = min(luma_m, min(min(luma_n, luma_s), min(luma_e, luma_w)));
     float luma_max = max(luma_m, max(max(luma_n, luma_s), max(luma_e, luma_w)));
@@ -77,10 +86,10 @@ vec3 fxaa(vec2 uv) {
         return rgb_m;
     }
 
-    float luma_nw = luma(texture(source_tex, uv + vec2(-texel.x, -texel.y)).rgb);
-    float luma_ne = luma(texture(source_tex, uv + vec2(texel.x, -texel.y)).rgb);
-    float luma_sw = luma(texture(source_tex, uv + vec2(-texel.x, texel.y)).rgb);
-    float luma_se = luma(texture(source_tex, uv + vec2(texel.x, texel.y)).rgb);
+    float luma_nw = luma(sample_source(uv + vec2(-texel.x, -texel.y)).rgb);
+    float luma_ne = luma(sample_source(uv + vec2(texel.x, -texel.y)).rgb);
+    float luma_sw = luma(sample_source(uv + vec2(-texel.x, texel.y)).rgb);
+    float luma_se = luma(sample_source(uv + vec2(texel.x, texel.y)).rgb);
 
     float edge_h =
         abs(luma_nw + luma_ne - 2.0 * luma_n) +
@@ -103,8 +112,8 @@ vec3 fxaa(vec2 uv) {
     vec3 negative = vec3(0.0);
     for (int i = 1; i <= steps; i++) {
         float t = float(i) / float(steps);
-        positive += texture(source_tex, uv + dir * t * 4.0).rgb;
-        negative += texture(source_tex, uv - dir * t * 4.0).rgb;
+        positive += sample_source(uv + dir * t * 4.0).rgb;
+        negative += sample_source(uv - dir * t * 4.0).rgb;
     }
     float count = float(steps);
     vec3 filtered = 0.5 * (positive + negative) / count;
@@ -120,7 +129,7 @@ vec3 fxaa(vec2 uv) {
 
 void main() {
     vec2 uv = source_uv(v_uv);
-    vec4 original = texture(source_tex, uv);
+    vec4 original = sample_source(uv);
 
     if ((pc.flags & FLAG_ENHANCEMENT_ENABLED) == 0u) {
         out_color = original;
