@@ -15,7 +15,7 @@ XRizer の実験的アンチエイリアス（AA）の設定リファレンス�
 | 項目 | 型 | 既定値 | 範囲 | 説明 |
 |---|---|---|---|---|
 | `enabled` | bool | `false` | — | AA 全体の有効／無効 |
-| `antialias` | string | `"cmaa2"` | `off` / `cmaa2` / `smaa` / `fxaa` | AA 方式 |
+| `antialias` | string | `"fxaa"`※ | `off` / `cmaa2` / `smaa` / `fxaa` | AA 方式 |
 | `weight_mode` | string | `"inverted"` | `center` / `inverted` / `whole` | 重み場のモード |
 | `center` | [x, y] | `[0.5, 0.5]` | 各 0.0〜1.0 | 重み場の中心（眼テクスチャ UV）。両眼共通 |
 | `center_offset` | number | `0.0` | -0.20〜0.20 | 眼ごとの x 補正。左眼は `-offset`、右眼は `+offset` |
@@ -33,6 +33,8 @@ XRizer の実験的アンチエイリアス（AA）の設定リファレンス�
 | `max_scale` | number | `1.5` | 0.1〜4.0 | `auto_scale` の上限 |
 
 `min_scale` が `max_scale` より大きい場合は入れ替えて解釈します。
+
+※ B1b の暫定既定は `fxaa` です。B2 で `cmaa2` に変更します。B1b では `cmaa2` / `smaa` を選んでも FXAA にフォールバックします。
 
 ## 重み場
 

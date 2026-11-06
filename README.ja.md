@@ -123,7 +123,7 @@ vr::VRSettings()->SetFloat("xrizer", "brightness", 0.5f); // ファイルにも�
 
 既定は無効。設定は `~/.config/xrizer/upscaler.json`（`XRIZER_UPSCALER_CONFIG` で上書き）に置き、500 ms ごとにホットリロードします。壊れた JSON の場合は直前の設定を維持します。
 
-このフォークは AA 専用です。提出画像のサイズは変更せず、出力解像度は常に入力と同じです。B1a でアップスケーラのプリセット、EASU、SGSR、ML モデル、Vulkan 機能レイヤーを撤去しました。B1b で等倍 FXAA、B2 で CMAA2、B3 で SMAA 1x を追加します。
+このフォークは AA 専用です。提出画像のサイズは変更せず、出力解像度は常に入力と同じです。B1a でアップスケーラのプリセット、EASU、SGSR、ML モデル、Vulkan 機能レイヤーを撤去しました。B1b で等倍 FXAA を実装しました。B2 で CMAA2、B3 で SMAA 1x を追加します。それまでは `cmaa2` / `smaa` は FXAA にフォールバックします。B1b の暫定既定は `fxaa` で、B2 で `cmaa2` に変更します。
 
 重み場は3モードです:
 
@@ -138,7 +138,7 @@ vr::VRSettings()->SetFloat("xrizer", "brightness", 0.5f); // ファイルにも�
 ```json
 {
   "enabled": true,
-  "antialias": "cmaa2",
+  "antialias": "fxaa",
   "weight_mode": "inverted",
   "center": [0.5, 0.5],
   "center_offset": 0.0,

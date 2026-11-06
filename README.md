@@ -192,7 +192,7 @@ vr::VRSettings()->SetFloat("xrizer", "brightness", 0.5f); // also persisted to f
 
 Default off. The config lives at `~/.config/xrizer/upscaler.json` (override with `XRIZER_UPSCALER_CONFIG`); it is hot-reloaded every 500 ms and a broken file keeps the last good settings.
 
-This fork is now AA-only. It never resizes the submitted eye image; the output extent equals the input extent. The upscaler presets, EASU, SGSR, ML model, and Vulkan feature layer were removed in B1a. B1b adds the equal-size FXAA pass; CMAA2 and SMAA 1x follow in B2 and B3.
+This fork is now AA-only. It never resizes the submitted eye image; the output extent equals the input extent. The upscaler presets, EASU, SGSR, ML model, and Vulkan feature layer were removed in B1a. B1b implements the equal-size FXAA pass. CMAA2 and SMAA 1x follow in B2 and B3; until then `cmaa2` and `smaa` fall back to FXAA. The B1b build defaults to `fxaa`; B2 changes the default to `cmaa2`.
 
 The radial weight field has three modes:
 
@@ -207,7 +207,7 @@ Example `~/.config/xrizer/upscaler.json`:
 ```json
 {
   "enabled": true,
-  "antialias": "cmaa2",
+  "antialias": "fxaa",
   "weight_mode": "inverted",
   "center": [0.5, 0.5],
   "center_offset": 0.0,
