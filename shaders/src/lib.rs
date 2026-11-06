@@ -14,8 +14,8 @@ pub fn compile(out_dir: &str) -> Vec<PathBuf> {
     let shaders = [
         ("overlay.vert", "vert_overlay.spv"),
         ("overlay.frag", "frag_overlay.spv"),
-        ("upscaler.vert", "vert_upscaler.spv"),
-        ("upscaler.frag", "frag_upscaler.spv"),
+        ("aa.vert", "vert_aa.spv"),
+        ("fxaa.frag", "frag_fxaa.spv"),
         ("capture.vert", "vert_capture.spv"),
         ("capture.frag", "frag_capture.spv"),
     ];

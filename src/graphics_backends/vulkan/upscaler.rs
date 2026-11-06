@@ -17,12 +17,26 @@ struct PushConstants {
     flags: u32,
     dst_width: u32,
     dst_height: u32,
-    con0: [u32; 4],
-    con1: [u32; 4],
-    con2: [u32; 4],
-    con3: [u32; 4],
-    ml_origin: [u32; 2],
-    ml_size: [u32; 2],
+    weight_mode: u32,
+    antialias: u32,
+    fxaa_quality: u32,
+    smaa_threshold: f32,
+}
+
+fn weight_mode_code(mode: crate::upscaler::WeightMode) -> u32 {
+    match mode {
+        crate::upscaler::WeightMode::Center => 0,
+        crate::upscaler::WeightMode::Inverted => 1,
+        crate::upscaler::WeightMode::Whole => 2,
+    }
+}
+
+fn fxaa_quality_code(quality: crate::upscaler::FxaaQuality) -> u32 {
+    match quality {
+        crate::upscaler::FxaaQuality::Performance => 0,
+        crate::upscaler::FxaaQuality::Balanced => 1,
+        crate::upscaler::FxaaQuality::Quality => 2,
+    }
 }
 
 pub struct UpscalerPipeline {
@@ -102,7 +116,7 @@ impl UpscalerPipeline {
             let source_sets = [sets[0], sets[1]];
 
             let push_constant_range = vk::PushConstantRange {
-                stage_flags: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                stage_flags: vk::ShaderStageFlags::FRAGMENT,
                 offset: 0,
                 size: std::mem::size_of::<PushConstants>() as u32,
             };
@@ -115,11 +129,11 @@ impl UpscalerPipeline {
 
             let vertex_module = create_shader_module(
                 device,
-                &include_bytes!(concat!(env!("OUT_DIR"), "/vert_upscaler.spv"))[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/vert_aa.spv"))[..],
             )?;
             let fragment_module = create_shader_module(
                 device,
-                &include_bytes!(concat!(env!("OUT_DIR"), "/frag_upscaler.spv"))[..],
+                &include_bytes!(concat!(env!("OUT_DIR"), "/frag_fxaa.spv"))[..],
             )?;
             let pipeline = create_graphics_pipeline(
                 device,
@@ -302,12 +316,15 @@ impl UpscalerPipeline {
                 flags: params.flags(),
                 dst_width: params.dst_width,
                 dst_height: params.dst_height,
-                con0: [0; 4],
-                con1: [0; 4],
-                con2: [0; 4],
-                con3: [0; 4],
-                ml_origin: [0; 2],
-                ml_size: [0; 2],
+                weight_mode: weight_mode_code(params.weight_mode),
+                antialias: match params.antialias {
+                    crate::upscaler::AntialiasMethod::Off => 0,
+                    crate::upscaler::AntialiasMethod::Cmaa2 => 1,
+                    crate::upscaler::AntialiasMethod::Smaa => 2,
+                    crate::upscaler::AntialiasMethod::Fxaa => 3,
+                },
+                fxaa_quality: fxaa_quality_code(params.fxaa_quality),
+                smaa_threshold: 0.0,
             };
 
             device.cmd_begin_render_pass(
@@ -336,7 +353,7 @@ impl UpscalerPipeline {
             device.cmd_push_constants(
                 command_buffer,
                 self.layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+                vk::ShaderStageFlags::FRAGMENT,
                 0,
                 std::slice::from_raw_parts(
                     (&raw const push).cast::<u8>(),
@@ -482,5 +499,30 @@ unsafe fn create_graphics_pipeline(
             )
             .map_err(|(_, error)| error)
             .map(|pipelines| pipelines[0])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::upscaler::{FxaaQuality, WeightMode};
+
+    #[test]
+    fn push_constants_match_the_shader_layout() {
+        assert_eq!(std::mem::size_of::<PushConstants>(), 64);
+    }
+
+    #[test]
+    fn weight_mode_codes_match_the_shader() {
+        assert_eq!(weight_mode_code(WeightMode::Center), 0);
+        assert_eq!(weight_mode_code(WeightMode::Inverted), 1);
+        assert_eq!(weight_mode_code(WeightMode::Whole), 2);
+    }
+
+    #[test]
+    fn fxaa_quality_codes_match_the_shader() {
+        assert_eq!(fxaa_quality_code(FxaaQuality::Performance), 0);
+        assert_eq!(fxaa_quality_code(FxaaQuality::Balanced), 1);
+        assert_eq!(fxaa_quality_code(FxaaQuality::Quality), 2);
     }
 }
