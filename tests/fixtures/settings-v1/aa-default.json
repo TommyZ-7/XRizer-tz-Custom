@@ -1,0 +1,19 @@
+{
+  "enabled": false,
+  "antialias": "cmaa2",
+  "weight_mode": "inverted",
+  "center": [0.5, 0.5],
+  "center_offset": 0.0,
+  "radius": 0.35,
+  "feather": 0.1,
+  "strength": 1.0,
+  "preserve_alpha": true,
+  "fxaa_quality": "quality",
+  "smaa_threshold": 0.1,
+  "compare": false,
+  "compare_interval_ms": 2000,
+  "show_region": false,
+  "auto_scale": false,
+  "min_scale": 0.5,
+  "max_scale": 1.5
+}

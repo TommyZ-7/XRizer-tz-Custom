@@ -1,8 +1,0 @@
-// Minimal DP4A pipeline-creation probe.
-#version 450
-#extension GL_EXT_integer_dot_product : require
-layout(local_size_x = 1) in;
-layout(set = 0, binding = 0) buffer Probe { int data[]; };
-void main() {
-    data[0] = dotPacked4x8EXT(data[0], data[0]);
-}

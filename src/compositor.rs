@@ -160,7 +160,7 @@ impl Compositor {
 
     fn update_auto_scale(&self) {
         let config = crate::upscaler::snapshot();
-        if !config.enabled || !config.auto_scale {
+        if !config.auto_scale {
             return;
         }
         let target_ms =
@@ -823,7 +823,6 @@ impl vr::IVRCompositor029_Interface for Compositor {
             texture: &vr::Texture_t,
             bounds: vr::VRTextureBounds_t,
             flags: vr::EVRSubmitFlags,
-            base_size: Option<(u32, u32)>,
         ) -> xr::Result<(), vr::EVRCompositorError>
         where
             for<'d> &'d openxr_data::GraphicalSession:
@@ -839,22 +838,8 @@ impl vr::IVRCompositor029_Interface for Compositor {
                 texture.eColorSpace,
                 bounds,
                 flags,
-                base_size,
             )
         }
-
-        #[macros::any_graphics(DynFrameController)]
-        fn supports_upscaler<G: GraphicsBackend + 'static>(ctrl: &FrameController<G>) -> bool {
-            ctrl.backend.supports_upscaler()
-        }
-
-        let upscaler_base = if crate::upscaler::snapshot().enabled
-            && ctrl.with_any_graphics::<supports_upscaler>(())
-        {
-            Some(self.openxr.base_recommended_view_size())
-        } else {
-            None
-        };
 
         if let Err(e) = ctrl.with_any_graphics_mut::<submit>((
             &session_lock,
@@ -862,7 +847,6 @@ impl vr::IVRCompositor029_Interface for Compositor {
             texture,
             bounds,
             submit_flags,
-            upscaler_base,
         )) {
             return e;
         }
@@ -1296,7 +1280,6 @@ impl<G: GraphicsBackend> FrameController<G> {
         color_space: vr::EColorSpace,
         bounds: vr::VRTextureBounds_t,
         submit_flags: vr::EVRSubmitFlags,
-        base_size: Option<(u32, u32)>,
     ) -> Result<(), vr::EVRCompositorError>
     where
         <G::Api as xr::Graphics>::Format: Eq,
@@ -1336,7 +1319,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                         self.backend.prepare_upscaler_source_views(prepare_extent);
                     }
                     let upscaler_params = if let Some(mut params) = self.frame_upscaler_params {
-                        // The weight/preset state is frame-locked, but the
+                        // The weight/AA state is frame-locked, but the
                         // submitted source bounds are per eye (double-wide or
                         // double-tall textures use different subrects).
                         params.src_bounds = bounds;
@@ -1348,12 +1331,7 @@ impl<G: GraphicsBackend> FrameController<G> {
                                 self.backend.supports_upscaler(),
                                 input_sample_count,
                             ) {
-                            let base = base_size.unwrap_or((input_width, input_height));
-                            upscaler_config
-                                .params_for_size(base.0, base.1, bounds)
-                                .map(|params| {
-                                    params.with_fallback(self.backend.supports_ml_upscaler())
-                                })
+                            upscaler_config.params_for_size(input_width, input_height, bounds)
                         } else {
                             None
                         };
@@ -1403,7 +1381,7 @@ impl<G: GraphicsBackend> FrameController<G> {
             if self.should_render && !self.submitting_null {
                 self.backend.flush_copies(self.image_index);
                 if let Some(params) = self.frame_upscaler_params {
-                    crate::upscaler::diagnostics::record_frame(params.preset, params.enabled);
+                    crate::upscaler::diagnostics::record_frame(params.antialias, params.enabled);
                 }
             }
             // If the session was restarted while no frame was begun, nothing has been acquired from the new swapchain yet, so there is nothing to release
@@ -1845,15 +1823,6 @@ mod tests {
             ctrl.backend.invalidations.load(Ordering::Relaxed)
         }
 
-        fn fake_supports_ml(&self) -> bool {
-            let data = self.comp.openxr.session_data.get();
-            let lock = data.comp_data.0.lock().unwrap();
-            let DynFrameController::Fake(ctrl) = lock.as_ref().unwrap() else {
-                panic!("Frame controller was not set up or not faked!");
-            };
-            ctrl.backend.supports_ml_upscaler()
-        }
-
         fn swapchain_size(&self) -> (u32, u32) {
             let data = self.comp.openxr.session_data.get();
             let lock = data.comp_data.0.lock().unwrap();
@@ -1919,7 +1888,6 @@ mod tests {
         assert!(params.enabled);
         assert_eq!(params.dst_width, SWAPCHAIN_WIDTH.with(Cell::get));
         assert_eq!(params.dst_height, SWAPCHAIN_HEIGHT.with(Cell::get));
-        assert_eq!(params.shader_kind(), 1);
 
         crate::upscaler::reset_for_test();
     }
@@ -1954,7 +1922,7 @@ mod tests {
     }
 
     #[test]
-    fn upscaler_output_size_uses_recommended_size_and_scale() {
+    fn aa_params_are_equal_size() {
         let _guard = crate::upscaler::test_lock();
         crate::upscaler::reset_for_test();
         let f = Fixture::new();
@@ -1962,7 +1930,6 @@ mod tests {
         f.set_fake_supports_upscaler(true);
         crate::upscaler::set_for_test(crate::upscaler::UpscalerConfig {
             enabled: true,
-            output_scale: 0.8,
             ..Default::default()
         });
 
@@ -1970,16 +1937,17 @@ mod tests {
         f.set_should_render(true);
         assert_eq!(f.submit(vr::EVREye::Left), None);
         assert_eq!(f.submit(vr::EVREye::Right), None);
-        assert_eq!(f.swapchain_size(), (8, 8));
+        assert_eq!(f.swapchain_size(), (10, 10));
+        let params = f.last_upscaler_params().expect("params should be recorded");
+        assert_eq!((params.dst_width, params.dst_height), (10, 10));
 
-        // A dynamic input size change must not resize the output swapchain.
         SWAPCHAIN_WIDTH.set(20);
         SWAPCHAIN_HEIGHT.set(20);
         assert_eq!(f.wait_get_poses(), None);
         f.set_should_render(true);
         assert_eq!(f.submit(vr::EVREye::Left), None);
         assert_eq!(f.submit(vr::EVREye::Right), None);
-        assert_eq!(f.swapchain_size(), (8, 8));
+        assert_eq!(f.swapchain_size(), (20, 20));
 
         SWAPCHAIN_WIDTH.set(10);
         SWAPCHAIN_HEIGHT.set(10);
@@ -1987,7 +1955,7 @@ mod tests {
     }
 
     #[test]
-    fn input_extent_change_invalidates_upscaler_source_views() {
+    fn input_extent_change_invalidates_aa_source_views() {
         let _guard = crate::upscaler::test_lock();
         crate::upscaler::reset_for_test();
         let f = Fixture::new();
@@ -1995,7 +1963,6 @@ mod tests {
         f.set_fake_supports_upscaler(true);
         crate::upscaler::set_for_test(crate::upscaler::UpscalerConfig {
             enabled: true,
-            output_scale: 0.8,
             ..Default::default()
         });
 
@@ -2003,7 +1970,7 @@ mod tests {
         f.set_should_render(true);
         assert_eq!(f.submit(vr::EVREye::Left), None);
         assert_eq!(f.submit(vr::EVREye::Right), None);
-        assert_eq!(f.swapchain_size(), (8, 8));
+        assert_eq!(f.swapchain_size(), (10, 10));
         assert_eq!(f.invalidation_count(), 1);
 
         // Same input extent: cached source views must survive.
@@ -2013,15 +1980,14 @@ mod tests {
         assert_eq!(f.submit(vr::EVREye::Right), None);
         assert_eq!(f.invalidation_count(), 1);
 
-        // Input-only resolution change: invalidate once, keep the output
-        // swapchain at the upscaled size.
+        // Input resolution change: invalidate once and follow the input size.
         SWAPCHAIN_WIDTH.set(20);
         SWAPCHAIN_HEIGHT.set(20);
         assert_eq!(f.wait_get_poses(), None);
         f.set_should_render(true);
         assert_eq!(f.submit(vr::EVREye::Left), None);
         assert_eq!(f.submit(vr::EVREye::Right), None);
-        assert_eq!(f.swapchain_size(), (8, 8));
+        assert_eq!(f.swapchain_size(), (20, 20));
         assert_eq!(f.invalidation_count(), 2);
 
         // A second frame at the new size must not invalidate again.
@@ -2031,55 +1997,28 @@ mod tests {
         assert_eq!(f.submit(vr::EVREye::Right), None);
         assert_eq!(f.invalidation_count(), 2);
 
-        // Returning to the previous size is a new change and must invalidate
-        // again; a stale view for the old extent must not be reused.
+        // Returning to the previous size is a new change.
         SWAPCHAIN_WIDTH.set(10);
         SWAPCHAIN_HEIGHT.set(10);
         assert_eq!(f.wait_get_poses(), None);
         f.set_should_render(true);
         assert_eq!(f.submit(vr::EVREye::Left), None);
         assert_eq!(f.submit(vr::EVREye::Right), None);
-        assert_eq!(f.swapchain_size(), (8, 8));
+        assert_eq!(f.swapchain_size(), (10, 10));
         assert_eq!(f.invalidation_count(), 3);
 
-        // Right-first submission must also invalidate once, before the
-        // right eye records.
+        // Right-first submission must also invalidate once.
         SWAPCHAIN_WIDTH.set(20);
         SWAPCHAIN_HEIGHT.set(20);
         assert_eq!(f.wait_get_poses(), None);
         f.set_should_render(true);
         assert_eq!(f.submit(vr::EVREye::Right), None);
         assert_eq!(f.submit(vr::EVREye::Left), None);
-        assert_eq!(f.swapchain_size(), (8, 8));
+        assert_eq!(f.swapchain_size(), (20, 20));
         assert_eq!(f.invalidation_count(), 4);
 
         SWAPCHAIN_WIDTH.set(10);
         SWAPCHAIN_HEIGHT.set(10);
-        crate::upscaler::reset_for_test();
-    }
-
-    #[test]
-    fn ml_preset_falls_back_when_backend_lacks_dp4a() {
-        let _guard = crate::upscaler::test_lock();
-        crate::upscaler::reset_for_test();
-        let f = Fixture::new();
-        f.ensure_real_session(false);
-        f.set_fake_supports_upscaler(true);
-        crate::upscaler::set_for_test(crate::upscaler::UpscalerConfig {
-            enabled: true,
-            preset: crate::upscaler::UpscalerPreset::Ml,
-            ..Default::default()
-        });
-
-        assert_eq!(f.wait_get_poses(), None);
-        f.set_should_render(true);
-        assert_eq!(f.submit(vr::EVREye::Left), None);
-        assert_eq!(f.submit(vr::EVREye::Right), None);
-        let params = f.last_upscaler_params().expect("params should be recorded");
-        assert!(!f.fake_supports_ml());
-        assert_eq!(params.preset, crate::upscaler::UpscalerPreset::Fsr);
-        assert_eq!(params.shader_kind(), 2);
-
         crate::upscaler::reset_for_test();
     }
 

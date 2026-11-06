@@ -1,0 +1,18 @@
+{
+  "enabled": false,
+  "center_left": [0.5, 0.5],
+  "center_right": [0.5, 0.5],
+  "center_offset": 0.0,
+  "inner_radius": 0.35,
+  "outer_radius": 0.7,
+  "feather": 0.1,
+  "rate_inner": "1x1",
+  "rate_mid": "2x2",
+  "rate_outer": "4x4",
+  "stereo_only": true,
+  "scene_format": "rgba16f",
+  "flip_y": true,
+  "compare": false,
+  "compare_interval_ms": 2000,
+  "debug_show_map": false
+}

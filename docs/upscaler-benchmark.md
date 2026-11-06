@@ -1,5 +1,10 @@
 # Upscaler benchmark — preliminary
 
+> **Historical:** this benchmark was written for the pre-B1a spatial
+> upscaler. The files `src/upscaler/inner_loop.rs`, `src/upscaler/model.rs`,
+> and the ML/FSR/SGSR shaders were removed in B1a. The current AA-only
+> benchmark should measure the equal-size FXAA/CMAA2/SMAA passes instead.
+
 Status: **preliminary**. The decision logic and benchmark shaders are in the
 tree; on-target timing on the RX 7900 XTX / RADV / WiVRn stack is still required.
 No numbers are recorded here until they are measured on that machine.
