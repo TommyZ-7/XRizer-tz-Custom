@@ -69,6 +69,13 @@ fn default_mode() -> String {
     "interval".to_string()
 }
 
+/// Keep old capture directories consistent with the AA-only contract.
+fn normalize_metadata(metadata: &mut CaptureMetadata, aa_method: &str) {
+    metadata.output_scale = 1.0;
+    metadata.preset = aa_method.to_string();
+    metadata.aa_mode = aa_method.to_string();
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 struct FrameMeta {
     index: u32,
@@ -246,7 +253,7 @@ impl CaptureState {
             .and_then(|metadata| metadata.frames.iter().map(|frame| frame.index).max())
             .map(|index| index.saturating_add(1))
             .unwrap_or_else(|| scan_next_index(&config.dir));
-        let metadata = existing.unwrap_or_else(|| CaptureMetadata {
+        let mut metadata = existing.unwrap_or_else(|| CaptureMetadata {
             capture_version: 1,
             game: game_name(),
             scene: config.scene.clone(),
@@ -256,10 +263,12 @@ impl CaptureState {
             session_started_unix_ms: now_unix_ms(),
             render_scale: crate::settings::current_supersample_scale(),
             output_scale: 1.0,
-            preset: format!("{:?}", crate::upscaler::snapshot().antialias).to_lowercase(),
+            preset: String::new(),
             mode: format!("{:?}", config.mode).to_lowercase(),
             frames: Vec::new(),
         });
+        let aa_method = format!("{:?}", crate::upscaler::snapshot().antialias).to_lowercase();
+        normalize_metadata(&mut metadata, &aa_method);
         let metadata = Arc::new(Mutex::new(metadata));
         let writer = CaptureWriter::new(config.dir.clone(), metadata.clone())?;
         let command_pool = unsafe {
@@ -1255,6 +1264,28 @@ mod tests {
     }
 
     #[test]
+    fn existing_metadata_is_normalized_to_aa_contract() {
+        let mut metadata = CaptureMetadata {
+            capture_version: 1,
+            game: "test".into(),
+            scene: "test".into(),
+            aa_mode: "unknown".into(),
+            color_space: "unknown".into(),
+            eye: "both".into(),
+            session_started_unix_ms: 1,
+            render_scale: 1.0,
+            output_scale: 0.8,
+            preset: "fsr".into(),
+            mode: "interval".into(),
+            frames: Vec::new(),
+        };
+        normalize_metadata(&mut metadata, "fxaa");
+        assert_eq!(metadata.output_scale, 1.0);
+        assert_eq!(metadata.preset, "fxaa");
+        assert_eq!(metadata.aa_mode, "fxaa");
+    }
+
+    #[test]
     fn png_writer_roundtrip() {
         let dir =
             std::env::temp_dir().join(format!("xrizer_capture_png_test_{}", std::process::id()));
@@ -1269,7 +1300,7 @@ mod tests {
             session_started_unix_ms: 1,
             render_scale: 1.0,
             output_scale: 1.0,
-            preset: "fast".into(),
+            preset: "fxaa".into(),
             mode: "interval".into(),
             frames: Vec::new(),
         }));

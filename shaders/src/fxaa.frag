@@ -23,7 +23,15 @@ layout(location = 0) out vec4 out_color;
 const uint FLAG_PRESERVE_ALPHA = 1u;
 const uint FLAG_SHOW_REGION = 2u;
 const uint FLAG_ENHANCEMENT_ENABLED = 4u;
+const uint FLAG_OUTPUT_UNORM = 8u;
 const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+
+vec4 encode_output(vec4 color) {
+    if ((pc.flags & FLAG_OUTPUT_UNORM) != 0u) {
+        return vec4(sqrt(max(color.rgb, vec3(0.0))), color.a);
+    }
+    return color;
+}
 
 float luma(vec3 color) {
     return dot(color, LUMA);
@@ -39,7 +47,8 @@ vec4 sample_source(vec2 uv) {
     vec2 texel = 1.0 / vec2(textureSize(source_tex, 0));
     vec2 lo = min(pc.src_bounds.xy, pc.src_bounds.zw) + texel * 0.5;
     vec2 hi = max(pc.src_bounds.xy, pc.src_bounds.zw) - texel * 0.5;
-    return texture(source_tex, clamp(uv, lo, hi));
+    // Guard a sub-texel subrect where lo can exceed hi.
+    return texture(source_tex, clamp(uv, min(lo, hi), max(lo, hi)));
 }
 
 // Mirrors src/upscaler/math.rs:weight_at_mode.
@@ -132,11 +141,11 @@ void main() {
     vec4 original = sample_source(uv);
 
     if ((pc.flags & FLAG_ENHANCEMENT_ENABLED) == 0u) {
-        out_color = original;
+        out_color = encode_output(original);
         return;
     }
     if ((pc.flags & FLAG_PRESERVE_ALPHA) != 0u && original.a < 0.999) {
-        out_color = original;
+        out_color = encode_output(original);
         return;
     }
 
@@ -152,5 +161,5 @@ void main() {
         rgb = mix(rgb, vec3(1.0, 0.0, 1.0), ring * 0.75);
     }
 
-    out_color = vec4(rgb, original.a);
+    out_color = encode_output(vec4(rgb, original.a));
 }

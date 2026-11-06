@@ -160,7 +160,7 @@ impl Compositor {
 
     fn update_auto_scale(&self) {
         let config = crate::upscaler::snapshot();
-        if !config.enabled || !config.auto_scale {
+        if !config.auto_scale {
             return;
         }
         let target_ms =

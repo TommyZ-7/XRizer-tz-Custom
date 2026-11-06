@@ -18,6 +18,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 pub const FLAG_PRESERVE_ALPHA: u32 = 1 << 0;
 pub const FLAG_SHOW_REGION: u32 = 1 << 1;
 pub const FLAG_ENHANCEMENT_ENABLED: u32 = 1 << 2;
+pub const FLAG_OUTPUT_UNORM: u32 = 1 << 3;
 
 const RELOAD_INTERVAL_MS: u64 = 500;
 
@@ -159,6 +160,9 @@ impl UpscalerConfig {
         }
 
         let config = self.clone().sanitized();
+        if config.antialias == AntialiasMethod::Off {
+            return None;
+        }
 
         Some(UpscalerParams {
             dst_width: base_width,
@@ -172,6 +176,7 @@ impl UpscalerConfig {
             antialias: config.antialias,
             weight_mode: config.weight_mode,
             fxaa_quality: config.fxaa_quality,
+            smaa_threshold: config.smaa_threshold,
             preserve_alpha: config.preserve_alpha,
             show_region: config.show_region,
             enabled: compare_enabled,
@@ -201,6 +206,7 @@ pub struct UpscalerParams {
     pub antialias: AntialiasMethod,
     pub weight_mode: WeightMode,
     pub fxaa_quality: FxaaQuality,
+    pub smaa_threshold: f32,
     pub preserve_alpha: bool,
     pub show_region: bool,
     pub enabled: bool,
@@ -222,6 +228,7 @@ impl PartialEq for UpscalerParams {
             && self.antialias == other.antialias
             && self.weight_mode == other.weight_mode
             && self.fxaa_quality == other.fxaa_quality
+            && self.smaa_threshold == other.smaa_threshold
             && self.preserve_alpha == other.preserve_alpha
             && self.show_region == other.show_region
             && self.enabled == other.enabled
@@ -229,17 +236,6 @@ impl PartialEq for UpscalerParams {
 }
 
 impl UpscalerParams {
-    /// Map destination UV to source texture UV, honouring the submitted
-    /// bounds (including vertically flipped submissions).
-    pub fn source_uv(&self, uv: [f32; 2]) -> [f32; 2] {
-        // Lerp form keeps the endpoints exactly at the submitted bounds even
-        // for non-power-of-two values like 0.1.
-        [
-            self.src_bounds.uMin * (1.0 - uv[0]) + self.src_bounds.uMax * uv[0],
-            self.src_bounds.vMin * (1.0 - uv[1]) + self.src_bounds.vMax * uv[1],
-        ]
-    }
-
     pub fn center_for_eye(&self, eye: usize) -> [f32; 2] {
         let offset = if eye == 0 {
             -self.center_offset
@@ -280,17 +276,10 @@ impl UpscalerParams {
         if self.show_region {
             flags |= FLAG_SHOW_REGION;
         }
-        if self.enabled && self.strength > 0.0 {
+        if self.enabled {
             flags |= FLAG_ENHANCEMENT_ENABLED;
         }
         flags
-    }
-
-    /// SGSR/FSR used flipped bounds as a fallback condition. The AA pass has
-    /// no such restriction, but callers still use this to preserve bounds
-    /// handling in tests and diagnostics.
-    pub fn has_flipped_bounds(&self) -> bool {
-        self.src_bounds.uMin > self.src_bounds.uMax || self.src_bounds.vMin > self.src_bounds.vMax
     }
 }
 

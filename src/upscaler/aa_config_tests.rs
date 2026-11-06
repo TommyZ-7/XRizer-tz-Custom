@@ -45,6 +45,27 @@ fn contract_aa_default_matches_runtime_defaults() {
 }
 
 #[test]
+fn off_disables_the_pass() {
+    let c = UpscalerConfig {
+        enabled: true,
+        antialias: AntialiasMethod::Off,
+        ..Default::default()
+    };
+    assert!(c.params_for_size(100, 100, full_bounds()).is_none());
+}
+
+#[test]
+fn params_carry_smaa_threshold() {
+    let c = UpscalerConfig {
+        enabled: true,
+        smaa_threshold: 0.17,
+        ..Default::default()
+    };
+    let p = c.params_for_size(100, 100, full_bounds()).unwrap();
+    assert_eq!(p.smaa_threshold, 0.17);
+}
+
+#[test]
 fn params_carry_fxaa_quality() {
     let c = UpscalerConfig {
         enabled: true,
@@ -215,11 +236,17 @@ fn flags_encode_alpha_region_and_enhancement() {
     let p = UpscalerConfig {
         enabled: true,
         strength: 0.0,
+        show_region: true,
         ..Default::default()
     }
     .params_for_size(100, 100, b)
     .unwrap();
-    assert_eq!(p.flags() & FLAG_ENHANCEMENT_ENABLED, 0);
+    // The contour is a diagnostic and must remain visible at strength 0.
+    assert_eq!(
+        p.flags() & FLAG_ENHANCEMENT_ENABLED,
+        FLAG_ENHANCEMENT_ENABLED
+    );
+    assert_eq!(p.flags() & FLAG_SHOW_REGION, FLAG_SHOW_REGION);
 }
 
 #[test]

@@ -310,62 +310,60 @@ impl GraphicsBackend for VulkanData {
         {
             let device = &self.device;
             let data = self.real_data.as_mut().unwrap();
-            if data.upscaler_pipeline.is_none() {
-                let created = unsafe {
-                    UpscalerPipeline::new(
-                        device,
-                        data.format,
-                        &data.images,
-                        data.width,
-                        data.height,
-                    )
-                };
-                match created {
-                    Ok(mut pipeline) => {
-                        unsafe {
-                            pipeline.prepare_source_views(
-                                &self.device,
-                                (texture.m_nWidth, texture.m_nHeight),
-                            );
-                        }
-                        data.upscaler_pipeline = Some(pipeline);
-                    }
-                    Err(error) => {
-                        warn!("Failed to create AA pipeline ({error:?}); using copy path");
-                        data.upscaler_failed = true;
-                    }
-                }
-            }
-            if let Some(pipeline) = data.upscaler_pipeline.as_mut() {
-                let buf = data.bufs[2 * image_index + eye as usize];
-                let mut rendered = true;
-                Self::record_only_on(device, buf, || unsafe {
-                    if let Err(error) = pipeline.record(
-                        device,
-                        buf,
-                        image_index,
-                        eye as usize,
-                        game_image,
-                        game_format,
-                        game_layer,
-                        (texture.m_nWidth, texture.m_nHeight),
-                        params,
-                    ) {
-                        warn!("Upscaler render setup failed ({error:?}); falling back");
-                        rendered = false;
-                    }
-                });
-                if rendered {
-                    return xr::Extent2Di {
-                        width: params.dst_width as _,
-                        height: params.dst_height as _,
+            if !data.upscaler_failed {
+                if data.upscaler_pipeline.is_none() {
+                    let created = unsafe {
+                        UpscalerPipeline::new(
+                            device,
+                            data.format,
+                            &data.images,
+                            data.width,
+                            data.height,
+                        )
                     };
+                    match created {
+                        Ok(mut pipeline) => {
+                            unsafe {
+                                pipeline.prepare_source_views(
+                                    &self.device,
+                                    (texture.m_nWidth, texture.m_nHeight),
+                                );
+                            }
+                            data.upscaler_pipeline = Some(pipeline);
+                        }
+                        Err(error) => {
+                            warn!("Failed to create AA pipeline ({error:?}); using copy path");
+                            data.upscaler_failed = true;
+                        }
+                    }
                 }
-                data.upscaler_failed = true;
-                return xr::Extent2Di {
-                    width: extent.width as _,
-                    height: extent.height as _,
-                };
+                if let Some(pipeline) = data.upscaler_pipeline.as_mut() {
+                    let buf = data.bufs[2 * image_index + eye as usize];
+                    let mut rendered = true;
+                    Self::record_only_on(device, buf, || unsafe {
+                        if let Err(error) = pipeline.record(
+                            device,
+                            buf,
+                            image_index,
+                            eye as usize,
+                            game_image,
+                            game_format,
+                            game_layer,
+                            (texture.m_nWidth, texture.m_nHeight),
+                            params,
+                        ) {
+                            warn!("AA render setup failed ({error:?}); falling back");
+                            rendered = false;
+                        }
+                    });
+                    if rendered {
+                        return xr::Extent2Di {
+                            width: params.dst_width as _,
+                            height: params.dst_height as _,
+                        };
+                    }
+                    data.upscaler_failed = true;
+                }
             }
         }
 

@@ -51,6 +51,7 @@ pub struct UpscalerPipeline {
     framebuffers: Vec<[vk::Framebuffer; 2]>,
     source_views: SourceViewCache,
     input_extent: ExtentTracker,
+    output_unorm: bool,
     width: u32,
     height: u32,
 }
@@ -206,6 +207,7 @@ impl UpscalerPipeline {
                 framebuffers,
                 source_views: SourceViewCache::default(),
                 input_extent: ExtentTracker::default(),
+                output_unorm: !format_is_srgb(target_format),
                 width,
                 height,
             })
@@ -313,7 +315,12 @@ impl UpscalerPipeline {
                 radius: params.radius,
                 feather: params.feather,
                 strength: params.strength,
-                flags: params.flags(),
+                flags: params.flags()
+                    | if self.output_unorm {
+                        crate::upscaler::FLAG_OUTPUT_UNORM
+                    } else {
+                        0
+                    },
                 dst_width: params.dst_width,
                 dst_height: params.dst_height,
                 weight_mode: weight_mode_code(params.weight_mode),
@@ -324,7 +331,7 @@ impl UpscalerPipeline {
                     crate::upscaler::AntialiasMethod::Fxaa => 3,
                 },
                 fxaa_quality: fxaa_quality_code(params.fxaa_quality),
-                smaa_threshold: 0.0,
+                smaa_threshold: params.smaa_threshold,
             };
 
             device.cmd_begin_render_pass(
@@ -502,6 +509,36 @@ unsafe fn create_graphics_pipeline(
     }
 }
 
+fn format_is_srgb(format: vk::Format) -> bool {
+    matches!(
+        format,
+        vk::Format::R8G8B8A8_SRGB
+            | vk::Format::B8G8R8A8_SRGB
+            | vk::Format::BC1_RGB_SRGB_BLOCK
+            | vk::Format::BC1_RGBA_SRGB_BLOCK
+            | vk::Format::BC2_SRGB_BLOCK
+            | vk::Format::BC3_SRGB_BLOCK
+            | vk::Format::BC7_SRGB_BLOCK
+            | vk::Format::ETC2_R8G8B8_SRGB_BLOCK
+            | vk::Format::ETC2_R8G8B8A1_SRGB_BLOCK
+            | vk::Format::ETC2_R8G8B8A8_SRGB_BLOCK
+            | vk::Format::ASTC_4X4_SRGB_BLOCK
+            | vk::Format::ASTC_5X4_SRGB_BLOCK
+            | vk::Format::ASTC_5X5_SRGB_BLOCK
+            | vk::Format::ASTC_6X5_SRGB_BLOCK
+            | vk::Format::ASTC_6X6_SRGB_BLOCK
+            | vk::Format::ASTC_8X5_SRGB_BLOCK
+            | vk::Format::ASTC_8X6_SRGB_BLOCK
+            | vk::Format::ASTC_8X8_SRGB_BLOCK
+            | vk::Format::ASTC_10X5_SRGB_BLOCK
+            | vk::Format::ASTC_10X6_SRGB_BLOCK
+            | vk::Format::ASTC_10X8_SRGB_BLOCK
+            | vk::Format::ASTC_10X10_SRGB_BLOCK
+            | vk::Format::ASTC_12X10_SRGB_BLOCK
+            | vk::Format::ASTC_12X12_SRGB_BLOCK
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -510,6 +547,26 @@ mod tests {
     #[test]
     fn push_constants_match_the_shader_layout() {
         assert_eq!(std::mem::size_of::<PushConstants>(), 64);
+        assert_eq!(std::mem::offset_of!(PushConstants, src_bounds), 0);
+        assert_eq!(std::mem::offset_of!(PushConstants, center), 16);
+        assert_eq!(std::mem::offset_of!(PushConstants, radius), 24);
+        assert_eq!(std::mem::offset_of!(PushConstants, feather), 28);
+        assert_eq!(std::mem::offset_of!(PushConstants, strength), 32);
+        assert_eq!(std::mem::offset_of!(PushConstants, flags), 36);
+        assert_eq!(std::mem::offset_of!(PushConstants, dst_width), 40);
+        assert_eq!(std::mem::offset_of!(PushConstants, dst_height), 44);
+        assert_eq!(std::mem::offset_of!(PushConstants, weight_mode), 48);
+        assert_eq!(std::mem::offset_of!(PushConstants, antialias), 52);
+        assert_eq!(std::mem::offset_of!(PushConstants, fxaa_quality), 56);
+        assert_eq!(std::mem::offset_of!(PushConstants, smaa_threshold), 60);
+    }
+
+    #[test]
+    fn srgb_format_detection() {
+        assert!(format_is_srgb(vk::Format::R8G8B8A8_SRGB));
+        assert!(format_is_srgb(vk::Format::B8G8R8A8_SRGB));
+        assert!(!format_is_srgb(vk::Format::R8G8B8A8_UNORM));
+        assert!(!format_is_srgb(vk::Format::B8G8R8A8_UNORM));
     }
 
     #[test]
